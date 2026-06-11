@@ -31,7 +31,7 @@ def load_base_model(config: ModelConfig) -> tuple[Any, Any]:
         (model, tokenizer) — exact types depend on Unsloth's internals.
     """
     # Lazy import: Unsloth is GPU-only, must not be loaded at module import time.
-    from unsloth import FastModel  # type: ignore[import-not-found]
+    from unsloth import FastModel
 
     log.info(
         "loading_base_model",
@@ -59,7 +59,7 @@ def attach_lora(model: Any, config: LoRAConfig) -> Any:
     string value enables Unsloth's memory-optimized checkpointing path
     which is what makes 2048-token context fit on a 16 GB T4.
     """
-    from unsloth import FastModel  # type: ignore[import-not-found]
+    from unsloth import FastModel
 
     log.info(
         "attaching_lora",

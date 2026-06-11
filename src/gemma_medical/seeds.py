@@ -11,13 +11,13 @@ def set_seed(seed: int = 3407) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
 
     try:
-        import numpy as np  # type: ignore[import-not-found]
+        import numpy as np
         np.random.seed(seed)
     except ImportError:
         pass
 
     try:
-        import torch  # type: ignore[import-not-found]
+        import torch
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
@@ -25,7 +25,7 @@ def set_seed(seed: int = 3407) -> None:
         pass
 
     try:
-        from transformers import set_seed as hf_set_seed  # type: ignore[import-not-found]
+        from transformers import set_seed as hf_set_seed
         hf_set_seed(seed)
     except ImportError:
         pass
