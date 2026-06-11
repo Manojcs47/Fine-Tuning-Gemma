@@ -81,7 +81,6 @@ class DataConfig(BaseModel):
     """Dataset loading + split definition."""
 
     dataset_name: str = "FreedomIntelligence/medical-o1-reasoning-SFT"
-    dataset_config_name: str | None = "en"
     split: str = "train"
     test_size: int = Field(default=500, ge=50, description="Last N examples held out as test")
     val_size: int = Field(default=500, ge=50, description="Next N examples held out for validation")
@@ -109,7 +108,6 @@ class TrainingConfig(BaseModel):
     @field_validator("save_steps")
     @classmethod
     def save_steps_multiple_of_eval_steps(cls, v: int, info: object) -> int:
-        # Light sanity check — eval and save should align so best-checkpoint logic is clean.
         return v
 
 
@@ -121,26 +119,51 @@ class EarlyStoppingConfig(BaseModel):
     early_stopping_threshold: float = Field(default=0.005, ge=0.0)
 
 
+class EvaluationConfig(BaseModel):
+    """Inference + metric + judge parameters used at M1 and after every M3 run."""
+
+    # How much to evaluate
+    n_predictions: int = Field(default=200, ge=10, le=500,
+                                description="Test examples to generate predictions on")
+    n_judge_samples: int = Field(default=50, ge=5, le=200,
+                                  description="Predictions to score with LLM-judge")
+    n_qualitative_samples: int = Field(default=10, ge=1, le=50,
+                                        description="Examples to dump to markdown for human reading")
+    perplexity_samples: int = Field(default=100, ge=10, le=500,
+                                     description="Val examples for perplexity computation")
+
+    # Generation parameters (deterministic for fair cross-run comparison)
+    max_new_tokens: int = Field(default=1024, ge=64, le=4096)
+    do_sample: bool = False
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    top_k: int = Field(default=64, ge=0)
+    batch_size: int = Field(default=4, ge=1, le=16,
+                             description="Batch size for batched generation")
+
+    # Judge
+    judge_model: str = Field(default="unsloth/gemma-4-E2B-it",
+                              description="HF model id used as LLM-judge")
+    judge_max_new_tokens: int = Field(default=256, ge=64, le=1024)
+    reuse_inference_model_as_judge: bool = Field(default=True,
+                                                  description="Skip judge model reload if it matches the inference model")
+
+
 class ExperimentConfig(BaseModel):
     """The complete, loggable description of one training run."""
 
     name: str = Field(description="Short identifier, used in W&B run name and output dir")
-    technique: Literal["lora", "qlora", "full_sft"] = "lora"
+    technique: Literal["lora", "qlora", "full_sft", "baseline"] = "lora"
     notes: str = ""
     model: ModelConfig = Field(default_factory=ModelConfig)
     lora: LoRAConfig = Field(default_factory=LoRAConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
-
-    @field_validator("technique")
-    @classmethod
-    def _qlora_implies_4bit(cls, v: str) -> str:
-        # Cross-field validation handled in the model_validator below.
-        return v
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
 
     def model_post_init(self, __context: object) -> None:
-        # QLoRA must load in 4-bit; full SFT must NOT use LoRA path.
+        # Cross-technique constraints
         if self.technique == "qlora":
             self.model.load_in_4bit = True
             self.model.full_finetuning = False
@@ -150,6 +173,10 @@ class ExperimentConfig(BaseModel):
         elif self.technique == "full_sft":
             self.model.load_in_4bit = False
             self.model.full_finetuning = True
+        elif self.technique == "baseline":
+            # Baseline: no training, no LoRA. Load base in bf16.
+            self.model.load_in_4bit = False
+            self.model.full_finetuning = False
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:

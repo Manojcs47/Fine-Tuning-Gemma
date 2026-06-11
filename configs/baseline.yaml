@@ -1,0 +1,44 @@
+# M1 baseline: base model, no training. Measures starting point.
+name: baseline-gemma4-e2b-it
+technique: baseline
+notes: |
+  M1 baseline measurement. Loads unsloth/gemma-4-E2B-it, generates predictions
+  on the last 200 examples of the held-out test slice, computes exact-match,
+  contains-match, token-F1, and LLM-judge scores on a 50-example sample.
+  Reuses the same model as judge to fit on T4.
+
+model:
+  base_model: unsloth/gemma-4-E2B-it
+  max_seq_length: 2048
+  load_in_4bit: false
+  full_finetuning: false
+
+# LoRA section unused for baseline but pydantic still requires defaults.
+lora:
+  r: 16
+  lora_alpha: 16
+
+data:
+  dataset_name: FreedomIntelligence/medical-o1-reasoning-SFT
+  split: train
+  test_size: 500
+  val_size: 500
+  seed: 3407
+
+training:
+  learning_rate: 2.0e-4   # unused for baseline
+
+early_stopping:
+  enabled: false
+
+evaluation:
+  n_predictions: 200
+  n_judge_samples: 50
+  n_qualitative_samples: 10
+  perplexity_samples: 100
+  max_new_tokens: 1024
+  do_sample: false
+  batch_size: 4
+  judge_model: unsloth/gemma-4-E2B-it
+  judge_max_new_tokens: 256
+  reuse_inference_model_as_judge: true
