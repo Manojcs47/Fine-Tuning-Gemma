@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets — NEVER commit
+.env
+.env.local
+*.key
+hf_token.txt
+wandb_key.txt
+
+# Model artifacts & data
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+checkpoints/
+outputs/
+wandb/
+lora-adapter/
+merged-model/
+
+# Datasets cache
+.cache/
+data/
+
+# Notebook outputs
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
