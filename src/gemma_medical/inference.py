@@ -20,15 +20,15 @@ log = get_logger(__name__)
 #
 # Gemma 4 is multimodal, so Unsloth's FastModel.from_pretrained returns a
 # `Gemma4Processor` rather than a plain `PreTrainedTokenizer`. The processor
-# is callable (so `tokenizer(text, return_tensors="pt", ...)` and
-# `tokenizer.batch_decode(...)` still work) and exposes `.apply_chat_template`,
-# but a few attributes/methods live on the inner text tokenizer instead:
-#   - .encode(...)       -> use tokenizer.tokenizer.encode(...)
-#   - .pad_token         -> may be None on the processor; check inner first
-#   - .padding_side      -> setting on the processor may be ignored
+# is callable but its signature differs in two important ways:
 #
-# These helpers paper over the difference so the rest of the module reads
-# the same whether we got a tokenizer or a processor.
+# 1. `.encode(...)` is NOT on the processor — it lives on `tokenizer.tokenizer`.
+#
+# 2. The callable signature is `__call__(self, images=None, text=None,
+#    videos=None, **kwargs)`. Positional strings get bound to `images`, not
+#    `text`, which then explodes downstream with "'NoneType' object is not
+#    subscriptable". Always pass text as a keyword argument:
+#    `tokenizer(text=..., return_tensors="pt")`.
 
 
 def _text_tokenizer(tokenizer: Any) -> Any:
@@ -153,8 +153,11 @@ def _generate_one_batch(
     """Generate completions for a batch of prompts. Returns the new text only."""
     import torch  # type: ignore[import-not-found]
 
+    # IMPORTANT: pass text as a keyword arg. Unsloth Zoo patches Gemma4Processor's
+    # __call__ to `(images=None, text=None, videos=None, **kwargs)`, so a
+    # positional `tokenizer(prompts, ...)` would bind `prompts` to `images`.
     inputs = tokenizer(
-        prompts,
+        text=prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
@@ -206,7 +209,13 @@ def generate_predictions(
         try:
             outputs = _generate_one_batch(model, tokenizer, prompts, config)
         except Exception as e:
-            log.error("batch_generation_failed", batch_start=i, error=str(e))
+            # Log error_type so we don't silently swallow the cause again.
+            log.error(
+                "batch_generation_failed",
+                batch_start=i,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             outputs = ["" for _ in batch_qs]
 
         for q, raw in zip(batch_qs, outputs, strict=True):

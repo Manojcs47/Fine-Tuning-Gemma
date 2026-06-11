@@ -116,7 +116,12 @@ class GemmaJudge:
             try:
                 r = self.score(q, g, p)
             except Exception as e:
-                log.warning("judge_call_failed", idx=i, error=str(e))
+                log.warning(
+                    "judge_call_failed",
+                    idx=i,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
                 r = JudgeResult(
                     conclusion_correctness=0.0,
                     reasoning_validity=0.0,
@@ -144,20 +149,31 @@ class GemmaJudge:
             messages, tokenize=False, add_generation_prompt=True
         )
 
+    def _inner_tokenizer(self) -> Any:
+        """Return the underlying text tokenizer (handles Gemma4Processor)."""
+        if hasattr(self.tokenizer, "encode"):
+            return self.tokenizer
+        return self.tokenizer.tokenizer  # Gemma4Processor → GemmaTokenizer
+
     def _generate(self, prompt: str) -> str:
         import torch  # type: ignore[import-not-found]
 
+        # `text=...` kwarg required by Unsloth Zoo's patched Gemma4Processor.
         inputs = self.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=2048
+            text=prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048,
         ).to(self.model.device)
 
+        inner = self._inner_tokenizer()
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.config.judge_max_new_tokens,
                 do_sample=False,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=inner.pad_token_id,
+                eos_token_id=inner.eos_token_id,
             )
 
         new_tokens = outputs[:, inputs["input_ids"].shape[1]:]

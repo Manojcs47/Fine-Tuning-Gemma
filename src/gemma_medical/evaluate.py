@@ -7,7 +7,6 @@ Three layers:
 """
 from __future__ import annotations
 
-import re
 import string
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -151,6 +150,10 @@ def compute_perplexity(
     Each text should already be chat-templated (i.e. what the model would see
     during training). We forward-pass with labels=input_ids and average the
     per-example losses.
+
+    Note on the `text=` kwarg: Unsloth Zoo's patched Gemma4Processor.__call__
+    binds positional args to `images`, not `text`. Always pass strings as
+    `text=...` to avoid the silent NoneType crash inside the processor.
     """
     import torch  # type: ignore[import-not-found]
 
@@ -161,7 +164,10 @@ def compute_perplexity(
     losses: list[float] = []
     for i, text in enumerate(texts):
         enc = tokenizer(
-            text, return_tensors="pt", truncation=True, max_length=max_length
+            text=text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length,
         ).to(model.device)
         input_ids = enc["input_ids"]
 
