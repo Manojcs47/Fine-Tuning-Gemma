@@ -57,8 +57,8 @@ class Splits:
 
 def load_raw_dataset(config: DataConfig) -> Dataset:
     """Fetch the medical-o1 dataset from the Hub."""
-    log.info("loading_dataset", name=config.dataset_name, config_name=config.dataset_config_name, split=config.split)
-    ds = load_dataset(config.dataset_name, config.dataset_config_name, split=config.split)
+    log.info("loading_dataset", name=config.dataset_name, split=config.split)
+    ds = load_dataset(config.dataset_name, split=config.split)
     if not isinstance(ds, Dataset):
         raise TypeError(f"Expected Dataset, got {type(ds).__name__}")
     log.info("dataset_loaded", n_examples=len(ds), columns=ds.column_names)

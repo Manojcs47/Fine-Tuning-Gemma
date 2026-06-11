@@ -1,9 +1,9 @@
 # Installed on Kaggle/Colab AFTER `pip install unsloth unsloth_zoo`.
-# Unsloth bundles compatible torch/transformers/trl/peft/bitsandbytes.
+# Unsloth bundles compatible torch/transformers/trl/peft/bitsandbytes/datasets.
+# Do NOT pin datasets here — Unsloth needs >=3.4.1, this file would downgrade it.
 pydantic>=2.6
 pydantic-settings>=2.2
 structlog>=24.1
 pyyaml>=6.0
 python-dotenv>=1.0
 wandb>=0.16
-datasets>=2.18,<3.0
