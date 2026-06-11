@@ -15,6 +15,58 @@ log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Tokenizer/Processor compatibility helpers
+# ---------------------------------------------------------------------------
+#
+# Gemma 4 is multimodal, so Unsloth's FastModel.from_pretrained returns a
+# `Gemma4Processor` rather than a plain `PreTrainedTokenizer`. The processor
+# is callable (so `tokenizer(text, return_tensors="pt", ...)` and
+# `tokenizer.batch_decode(...)` still work) and exposes `.apply_chat_template`,
+# but a few attributes/methods live on the inner text tokenizer instead:
+#   - .encode(...)       -> use tokenizer.tokenizer.encode(...)
+#   - .pad_token         -> may be None on the processor; check inner first
+#   - .padding_side      -> setting on the processor may be ignored
+#
+# These helpers paper over the difference so the rest of the module reads
+# the same whether we got a tokenizer or a processor.
+
+
+def _text_tokenizer(tokenizer: Any) -> Any:
+    """Return the underlying text tokenizer for a HF tokenizer-or-processor."""
+    if hasattr(tokenizer, "encode"):  # plain PreTrainedTokenizer
+        return tokenizer
+    inner = getattr(tokenizer, "tokenizer", None)
+    if inner is not None and hasattr(inner, "encode"):
+        return inner
+    raise AttributeError(
+        f"Object of type {type(tokenizer).__name__} is neither a tokenizer "
+        "with .encode() nor a processor exposing .tokenizer"
+    )
+
+
+def _count_tokens(tokenizer: Any, text: str) -> int:
+    """Count tokens in `text`, robust to tokenizer-vs-processor."""
+    return len(_text_tokenizer(tokenizer).encode(text, add_special_tokens=False))
+
+
+def _configure_padding(tokenizer: Any) -> None:
+    """Ensure left padding + a pad token, on both the processor and inner tokenizer."""
+    inner = _text_tokenizer(tokenizer)
+
+    # padding_side: set on both, since either may be read at call time
+    inner.padding_side = "left"
+    if hasattr(tokenizer, "padding_side"):
+        try:
+            tokenizer.padding_side = "left"
+        except (AttributeError, TypeError):
+            pass  # processor may not allow direct assignment
+
+    # pad token: inherit from EOS if missing
+    if getattr(inner, "pad_token", None) is None:
+        inner.pad_token = inner.eos_token
+
+
+# ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 
@@ -54,10 +106,15 @@ def load_model_for_inference(
     # Switch to inference mode (Unsloth: 2x faster)
     FastModel.for_inference(model)
 
-    # Generation needs left padding for decoder-only models
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Generation needs left padding for decoder-only models. Gemma4Processor
+    # delegates some attrs to the inner tokenizer — set them there directly.
+    _configure_padding(tokenizer)
+
+    log.info(
+        "tokenizer_kind",
+        cls=type(tokenizer).__name__,
+        inner=type(_text_tokenizer(tokenizer)).__name__,
+    )
 
     return model, tokenizer
 
@@ -104,11 +161,12 @@ def _generate_one_batch(
         max_length=2048,
     ).to(model.device)
 
+    inner = _text_tokenizer(tokenizer)
     gen_kwargs: dict[str, Any] = {
         "max_new_tokens": config.max_new_tokens,
         "do_sample": config.do_sample,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
+        "pad_token_id": inner.pad_token_id,
+        "eos_token_id": inner.eos_token_id,
     }
     if config.do_sample:
         gen_kwargs.update(
@@ -153,7 +211,7 @@ def generate_predictions(
 
         for q, raw in zip(batch_qs, outputs, strict=True):
             reasoning, answer = parse_response(raw)
-            n_tokens = len(tokenizer.encode(raw, add_special_tokens=False))
+            n_tokens = _count_tokens(tokenizer, raw) if raw else 0
             results.append(
                 GenerationOutput(
                     question=q,

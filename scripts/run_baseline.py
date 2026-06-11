@@ -17,6 +17,20 @@ Quick test (10 samples only):
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Unsloth MUST be imported before transformers/peft so its monkey-patches
+# can take effect. Importing here at top of file (before any gemma_medical
+# imports that transitively pull `transformers` via `datasets`) silences
+# the "Unsloth should be imported before [transformers, peft]" warning.
+# The import has no side-effects beyond patching.
+# ---------------------------------------------------------------------------
+try:
+    import unsloth  # type: ignore[import-not-found]  # noqa: F401
+except ImportError:
+    # CPU-only laptops without unsloth still need to import this script
+    # for testing — the GPU codepath is gated by load_model_for_inference.
+    pass
+
 import argparse
 import gc
 import json
@@ -25,6 +39,7 @@ import random
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 # Make src/ importable without `pip install -e .` for raw script runs
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
