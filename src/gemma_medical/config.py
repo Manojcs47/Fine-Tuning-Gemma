@@ -78,9 +78,19 @@ class LoRAConfig(BaseModel):
 
 
 class DataConfig(BaseModel):
-    """Dataset loading + split definition."""
+    """Dataset loading + split definition.
+
+    Note on `dataset_config`: as of mid-2026 the medical-o1-reasoning-SFT dataset
+    splits into four language configs (`en`, `zh`, `en_mix`, `zh_mix`) and the
+    Hub requires picking one. We default to `en` since the assignment is in
+    English; older versions of the dataset did not need this argument.
+    """
 
     dataset_name: str = "FreedomIntelligence/medical-o1-reasoning-SFT"
+    dataset_config: str | None = Field(
+        default="en",
+        description="HF dataset config/subset name. Use None for single-config datasets.",
+    )
     split: str = "train"
     test_size: int = Field(default=500, ge=50, description="Last N examples held out as test")
     val_size: int = Field(default=500, ge=50, description="Next N examples held out for validation")
