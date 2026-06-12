@@ -84,6 +84,21 @@ def build_trainer(
 
     report_to = ["wandb"] if use_wandb else ["none"]
 
+    # NOTE on TRL API changes (TRL >= 0.16, bundled with Unsloth 2026.6+):
+    #   - SFTConfig.max_seq_length was renamed to `max_length`.
+    #   - SFTTrainer's `tokenizer=` kwarg was renamed to `processing_class=`.
+    #
+    # NOTE on `dataset_num_proc=1`:
+    #   Unsloth's fast-tokenizer patches transitively reference
+    #   `torch._dynamo.config.ConfigModuleInstance`, which `dill` cannot pickle.
+    #   When TRL's `_prepare_dataset` calls `dataset.map(..., num_proc=N)` with
+    #   N>1, multiprocess workers fail with:
+    #       TypeError: cannot pickle 'ConfigModuleInstance' object
+    #   The crash happens on the "Tokenizing train dataset" step specifically
+    #   (not on "Adding EOS" or our own chat-template step, both of which use
+    #   pure-Python paths that don't drag in the Dynamo config).
+    #   Running TRL's tokenization in-process sidesteps pickling entirely.
+    #   Cost: ~30-60s of extra wall-clock once per run; results are cached.
     sft_args = SFTConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
@@ -108,8 +123,8 @@ def build_trainer(
         fp16=fp16,
         optim="adamw_8bit",
         dataset_text_field="text",
-        max_length=cfg.model.max_seq_length,
-        dataset_num_proc=2,
+        max_length=cfg.model.max_seq_length,   # was: max_seq_length=...
+        dataset_num_proc=1,                    # was: 2 — see note above
         packing=False,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
@@ -142,9 +157,10 @@ def build_trainer(
         )
 
     # --- Trainer -----------------------------------------------------------
+    # `tokenizer=` was renamed to `processing_class=` in TRL >= 0.16.
     trainer = SFTTrainer(
         model=model,
-        processing_class=tokenizer,
+        processing_class=tokenizer,            # was: tokenizer=tokenizer
         train_dataset=splits.train,
         eval_dataset=eval_subset,
         args=sft_args,

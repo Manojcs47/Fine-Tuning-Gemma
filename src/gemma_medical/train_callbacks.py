@@ -26,6 +26,29 @@ log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Tokenizer/Processor compatibility helper
+# ---------------------------------------------------------------------------
+#
+# Gemma 4 is multimodal, so Unsloth's FastModel.from_pretrained returns a
+# `Gemma4Processor` rather than a plain `PreTrainedTokenizer`. The processor:
+#   1. Binds positional args to `images=`, not `text=` — see `inference.py`.
+#   2. May not expose `pad_token_id` / `eos_token_id` directly on every
+#      version; they live on `tokenizer.tokenizer` for sure.
+# This helper mirrors `inference._text_tokenizer` so the sample printer is
+# robust to whichever object we're handed.
+
+
+def _text_tokenizer(tokenizer: Any) -> Any:
+    """Return the underlying text tokenizer, whether given a tokenizer or processor."""
+    if hasattr(tokenizer, "encode"):
+        return tokenizer
+    inner = getattr(tokenizer, "tokenizer", None)
+    if inner is not None and hasattr(inner, "encode"):
+        return inner
+    return tokenizer  # last-resort fallback
+
+
+# ---------------------------------------------------------------------------
 # Sample printer
 # ---------------------------------------------------------------------------
 
@@ -71,7 +94,12 @@ class SamplePrinterCallback(TrainerCallback):
         try:
             self._print_one_sample(model, state.global_step)
         except Exception as e:
-            log.warning("sample_printer_failed", step=state.global_step, error=str(e))
+            log.warning(
+                "sample_printer_failed",
+                step=state.global_step,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
 
         return control
 
@@ -85,9 +113,23 @@ class SamplePrinterCallback(TrainerCallback):
         gold = ex["Response"]
 
         prompt = format_for_inference(question, self.tokenizer)
+
+        # IMPORTANT: pass text as a keyword arg. Unsloth Zoo patches
+        # Gemma4Processor.__call__ to `(images=None, text=None, videos=None,
+        # **kwargs)`, so a positional `tokenizer(prompt, ...)` binds `prompt`
+        # to `images` and the processor explodes inside its image branch.
         inputs = self.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=2048
+            text=prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048,
         ).to(model.device)
+
+        # Read special-token IDs from the inner text tokenizer (the processor
+        # does not always expose them directly).
+        inner = _text_tokenizer(self.tokenizer)
+        pad_id = getattr(inner, "pad_token_id", None) or getattr(inner, "eos_token_id", None)
+        eos_id = getattr(inner, "eos_token_id", None)
 
         was_training = model.training
         model.eval()
@@ -97,8 +139,8 @@ class SamplePrinterCallback(TrainerCallback):
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
-                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
+                    pad_token_id=pad_id,
+                    eos_token_id=eos_id,
                 )
             new_tokens = outputs[:, inputs["input_ids"].shape[1]:]
             raw = self.tokenizer.decode(new_tokens[0], skip_special_tokens=True).strip()
