@@ -6,15 +6,20 @@ notes: |
   Acceptance: trains without OOM, loss decreases monotonically after warmup.
 
   Batch sizing note (2026-06-12):
-  Per-device batch is 1 (not 2 or 4) because UNSLOTH_RETURN_LOGITS=1 forces
-  the full [batch x seq x vocab] logits tensor to be materialized, and on
-  T4 (fp16 autocast) accelerate then upcasts it to fp32 — doubling memory.
-  Per-device 1 + grad-accum 8 gives the same effective batch as the
-  original setting (1 x 8 = 8) while staying inside T4's VRAM budget.
+  Per-device batch is 1 because UNSLOTH_RETURN_LOGITS=1 forces the full
+  [batch x seq x vocab] logits tensor to be materialized, and on T4 (fp16
+  autocast) accelerate then upcasts it to fp32 — doubling memory. Per-device
+  1 + grad-accum 8 gives effective batch=8.
+
+  Context length note (2026-06-12 — OOM fix):
+  max_seq_length is 1024 not 2048. With Gemma 4's 262K vocab, the eval-time
+  logits tensor at seq=2048 + fp32 conversion exceeds T4's headroom and OOMs
+  at the first eval. seq=1024 fits with margin, and >95% of medical-o1
+  Question+CoT+Response triples fit in 1024 tokens after templating.
 
 model:
   base_model: unsloth/gemma-4-E2B-it
-  max_seq_length: 2048
+  max_seq_length: 1024              # was 2048 — see context length note above
   load_in_4bit: false
   full_finetuning: false
 
@@ -43,9 +48,9 @@ data:
 
 training:
   learning_rate: 2.0e-4
-  per_device_train_batch_size: 1     # was 2 — see batch sizing note above
-  per_device_eval_batch_size: 1      # match train, otherwise default 8 OOMs at eval
-  gradient_accumulation_steps: 8     # was 4 — compensate to keep effective batch=8
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
   num_train_epochs: 1.0
   warmup_ratio: 0.05
   weight_decay: 0.01
@@ -55,9 +60,24 @@ training:
   save_total_limit: 3
   logging_steps: 10
   sample_print_steps: 100
+  eval_dataset_size: 100
+  eval_accumulation_steps: 1        # stream logits to CPU per eval batch
+  disable_intraining_eval: false    # smoke test overrides this to true
   seed: 3407
 
 early_stopping:
   enabled: true
   early_stopping_patience: 3
   early_stopping_threshold: 0.005
+
+evaluation:
+  n_predictions: 200
+  n_judge_samples: 50
+  n_qualitative_samples: 10
+  perplexity_samples: 100
+  max_new_tokens: 1024
+  do_sample: false
+  batch_size: 4
+  judge_model: unsloth/gemma-4-E2B-it
+  judge_max_new_tokens: 256
+  reuse_inference_model_as_judge: true

@@ -123,6 +123,26 @@ class TrainingConfig(BaseModel):
                                     description="Print a sample generation every N steps")
     eval_dataset_size: int = Field(default=100, ge=10, le=500,
                                     description="Val examples used for training-time eval (smaller = faster eval)")
+
+    # ----- Memory-safety knobs (M2 OOM fix) ----------------------------------
+    eval_accumulation_steps: int | None = Field(
+        default=1, ge=1, le=64,
+        description=(
+            "Move eval logits from GPU to CPU every N batches. With Gemma 4's "
+            "262K vocab the per-batch logits tensor is ~1 GB at seq=1024; "
+            "without this setting they accumulate on GPU and OOM."
+        ),
+    )
+    disable_intraining_eval: bool = Field(
+        default=False,
+        description=(
+            "Skip evaluation during training entirely (eval_strategy='no'). "
+            "Useful for smoke tests on tight VRAM budgets — post-training eval "
+            "still runs through evaluation_pipeline, which uses model.generate "
+            "(not compute_loss) and has its own memory profile."
+        ),
+    )
+
     seed: int = 3407
 
     @field_validator("save_steps")
@@ -134,7 +154,6 @@ class TrainingConfig(BaseModel):
     def effective_eval_batch_size(self) -> int:
         """`per_device_eval_batch_size` falling back to `per_device_train_batch_size`."""
         return self.per_device_eval_batch_size or self.per_device_train_batch_size
-
 
 class EarlyStoppingConfig(BaseModel):
     """Hugging Face EarlyStoppingCallback args."""

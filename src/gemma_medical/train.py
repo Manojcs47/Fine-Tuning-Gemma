@@ -22,11 +22,6 @@ from gemma_medical.config import ExperimentConfig, RuntimeSettings
 from gemma_medical.data import Splits, prepare_datasets
 from gemma_medical.logging_setup import get_logger
 from gemma_medical.model import build_model_for_experiment
-from gemma_medical.train_callbacks import (
-    MemoryMonitorCallback,
-    SamplePrinterCallback,
-    StructuredLoggerCallback,
-)
 
 log = get_logger(__name__)
 
@@ -144,7 +139,7 @@ def build_trainer(
     )
     log.info("eval_subset_size", n=n_eval, full_val=len(splits.val))
 
-    # --- SFTConfig ---------------------------------------------------------
+# --- SFTConfig ---------------------------------------------------------
     bf16, fp16 = _detect_dtype_flags()
     log.info("dtype_flags", bf16=bf16, fp16=fp16)
 
@@ -155,21 +150,32 @@ def build_trainer(
     #   - SFTTrainer's `tokenizer=` kwarg was renamed to `processing_class=`.
     #
     # NOTE on `dataset_num_proc=1`:
-    #   Defense in depth only — the real fix is the pre-tokenization above.
-    #   Unsloth's tokenizer references torch._dynamo.config.ConfigModuleInstance,
-    #   which dill cannot pickle. Setting dataset_num_proc=1 here is NOT enough
-    #   on its own: TRL/datasets still spawn a multiprocess.Pool in some code
-    #   paths regardless of this setting. We sidestep the whole problem by
-    #   feeding SFTTrainer a dataset that already has input_ids — TRL detects
-    #   is_processed=True and skips the broken tokenization map. This setting
-    #   protects any subsequent map calls (EOS append, truncate) that don't
-    #   drag the Dynamo config into their closures.
+    #   Defense in depth — see pre_tokenize_for_training docstring.
     #
     # NOTE on `per_device_eval_batch_size`:
     #   If not set, TrainingArguments defaults to 8 — which OOMs at the first
     #   eval on T4 (the fp32 logits tensor at batch=8, seq=2048 is ~17 GB).
-    #   We fall back to the train batch when the YAML doesn't specify one.
+    #
+    # NOTE on `eval_accumulation_steps`:
+    #   Gemma 4's vocab is ~262K. The per-batch eval logits tensor at seq=1024
+    #   is ~1 GB; without this setting they accumulate on GPU and OOM. With it
+    #   set to 1, logits move to CPU after every eval batch.
+    #
+    # NOTE on `disable_intraining_eval`:
+    #   When true (used by smoke test) we skip eval during training entirely.
+    #   `load_best_model_at_end` MUST also be disabled in that case — HF Trainer
+    #   raises if best-tracking is on but eval_strategy='no'.
     eval_batch = cfg.training.effective_eval_batch_size
+
+    if cfg.training.disable_intraining_eval:
+        log.warning("in_training_eval_disabled",
+                    reason="cfg.training.disable_intraining_eval=True")
+        eval_strategy_value: str = "no"
+        load_best = False
+    else:
+        eval_strategy_value = "steps"
+        load_best = True
+
     log.info(
         "batch_sizes",
         per_device_train=cfg.training.per_device_train_batch_size,
@@ -179,9 +185,11 @@ def build_trainer(
             cfg.training.per_device_train_batch_size
             * cfg.training.gradient_accumulation_steps
         ),
+        eval_strategy=eval_strategy_value,
+        eval_accumulation_steps=cfg.training.eval_accumulation_steps,
     )
 
-    sft_args = SFTConfig(
+    sft_args_kwargs: dict[str, Any] = dict(
         output_dir=str(output_dir),
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
         per_device_eval_batch_size=eval_batch,
@@ -192,29 +200,44 @@ def build_trainer(
         lr_scheduler_type=cfg.training.lr_scheduler_type,
         weight_decay=cfg.training.weight_decay,
         logging_steps=cfg.training.logging_steps,
-        eval_strategy="steps",
-        eval_steps=cfg.training.eval_steps,
+        eval_strategy=eval_strategy_value,
         save_strategy="steps",
         save_steps=cfg.training.save_steps,
         save_total_limit=cfg.training.save_total_limit,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        load_best_model_at_end=load_best,
         report_to=report_to,
         seed=cfg.training.seed,
         bf16=bf16,
         fp16=fp16,
         optim="adamw_8bit",
         dataset_text_field="text",
-        max_length=cfg.model.max_seq_length,   # was: max_seq_length=...
-        dataset_num_proc=1,                    # was: 2 — see note above
+        max_length=cfg.model.max_seq_length,
+        dataset_num_proc=1,
         packing=False,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         run_name=cfg.name,
     )
 
+    # Only set eval-related kwargs when eval is actually enabled. Setting them
+    # alongside eval_strategy="no" provokes warnings and, in some versions,
+    # validation errors from HF Trainer.
+    if not cfg.training.disable_intraining_eval:
+        sft_args_kwargs["eval_steps"] = cfg.training.eval_steps
+        sft_args_kwargs["metric_for_best_model"] = "eval_loss"
+        sft_args_kwargs["greater_is_better"] = False
+        if cfg.training.eval_accumulation_steps is not None:
+            sft_args_kwargs["eval_accumulation_steps"] = cfg.training.eval_accumulation_steps
+
+    sft_args = SFTConfig(**sft_args_kwargs)
+
     # --- Callbacks ---------------------------------------------------------
+    from gemma_medical.train_callbacks import (
+        MemoryMonitorCallback,
+        SamplePrinterCallback,
+        StructuredLoggerCallback,
+    )
+    
     callbacks: list[Any] = [
         SamplePrinterCallback(
             tokenizer=tokenizer,
@@ -226,7 +249,7 @@ def build_trainer(
         StructuredLoggerCallback(),
     ]
 
-    if cfg.early_stopping.enabled:
+    if cfg.early_stopping.enabled and not cfg.training.disable_intraining_eval:
         callbacks.append(
             EarlyStoppingCallback(
                 early_stopping_patience=cfg.early_stopping.early_stopping_patience,
@@ -237,6 +260,11 @@ def build_trainer(
             "early_stopping_enabled",
             patience=cfg.early_stopping.early_stopping_patience,
             threshold=cfg.early_stopping.early_stopping_threshold,
+        )
+    elif cfg.early_stopping.enabled and cfg.training.disable_intraining_eval:
+        log.warning(
+            "early_stopping_skipped",
+            reason="cannot early-stop when in-training eval is disabled",
         )
 
     # --- Trainer -----------------------------------------------------------

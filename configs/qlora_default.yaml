@@ -2,16 +2,17 @@
 name: qlora-default-r16-lr2e4
 technique: qlora
 notes: |
-  M4 QLoRA comparison. Identical to lora_default.yaml except 4-bit quantization.
-  Used to quantify the quality/memory trade-off of 4-bit.
+  M4 QLoRA comparison. Identical to lora_default.yaml in optimizer settings;
+  the differences are 4-bit base weights and (because that frees memory)
+  max_seq_length restored to 2048.
 
-  Batch sizing matches lora_default.yaml even though QLoRA has more memory
-  headroom — keeps the comparison clean (effective batch=8 both ways).
+  Batch sizing matches lora_default.yaml — effective batch=8 both ways for
+  a clean comparison.
 
 model:
   base_model: unsloth/gemma-4-E2B-it
-  max_seq_length: 2048
-  load_in_4bit: true       # only difference vs LoRA default
+  max_seq_length: 2048              # QLoRA has headroom (4-bit base ~2.5 GB)
+  load_in_4bit: true                # only weight change vs LoRA default
   full_finetuning: false
 
 lora:
@@ -39,9 +40,9 @@ data:
 
 training:
   learning_rate: 2.0e-4
-  per_device_train_batch_size: 1     # was 2 — see lora_default.yaml batch sizing note
+  per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 8     # was 4 — compensate to keep effective batch=8
+  gradient_accumulation_steps: 8
   num_train_epochs: 1.0
   warmup_ratio: 0.05
   weight_decay: 0.01
@@ -51,9 +52,24 @@ training:
   save_total_limit: 3
   logging_steps: 10
   sample_print_steps: 100
+  eval_dataset_size: 100
+  eval_accumulation_steps: 1
+  disable_intraining_eval: false
   seed: 3407
 
 early_stopping:
   enabled: true
   early_stopping_patience: 3
   early_stopping_threshold: 0.005
+
+evaluation:
+  n_predictions: 200
+  n_judge_samples: 50
+  n_qualitative_samples: 10
+  perplexity_samples: 100
+  max_new_tokens: 1024
+  do_sample: false
+  batch_size: 4
+  judge_model: unsloth/gemma-4-E2B-it
+  judge_max_new_tokens: 256
+  reuse_inference_model_as_judge: true

@@ -58,19 +58,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def apply_smoke_test_overrides(cfg: ExperimentConfig) -> None:
-    """Shrink everything so the pipeline runs end-to-end in ~5 minutes."""
-    cfg.training.num_train_epochs = 0.01  # ~25-30 steps with batch 8
-    cfg.training.eval_steps = 10
-    cfg.training.save_steps = 20
+    """Shrink everything so the pipeline runs end-to-end in ~5 minutes.
+
+    Critically: in-training eval is DISABLED for smoke tests. The OOM at
+    eval-step-10 is the dominant failure mode on T4, and a smoke test's
+    job is to verify the pipeline plumbing, not to exercise the eval loop
+    (post-training eval runs through evaluation_pipeline, which uses
+    model.generate() and has a different memory profile).
+    """
+    cfg.training.num_train_epochs = 0.01      # ~12 train steps
+    cfg.training.save_steps = 20              # save once
     cfg.training.logging_steps = 5
-    cfg.training.sample_print_steps = 10
-    cfg.training.eval_dataset_size = 20
+    cfg.training.sample_print_steps = 10      # operator-side signal still fires
+    cfg.training.disable_intraining_eval = True   # <<< the OOM fix
     cfg.evaluation.n_predictions = 10
     cfg.evaluation.n_judge_samples = 5
     cfg.evaluation.n_qualitative_samples = 3
     cfg.evaluation.perplexity_samples = 10
     cfg.early_stopping.enabled = False
-    log.info("smoke_test_overrides_applied")
+    log.info("smoke_test_overrides_applied",
+             in_training_eval="disabled")
 
 
 def init_wandb(cfg: ExperimentConfig, settings: RuntimeSettings, tags: list[str]) -> Any:
