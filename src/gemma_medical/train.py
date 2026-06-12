@@ -108,7 +108,7 @@ def build_trainer(
         fp16=fp16,
         optim="adamw_8bit",
         dataset_text_field="text",
-        max_seq_length=cfg.model.max_seq_length,
+        max_length=cfg.model.max_seq_length,
         dataset_num_proc=2,
         packing=False,
         dataloader_pin_memory=True,
@@ -144,7 +144,7 @@ def build_trainer(
     # --- Trainer -----------------------------------------------------------
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=splits.train,
         eval_dataset=eval_subset,
         args=sft_args,
