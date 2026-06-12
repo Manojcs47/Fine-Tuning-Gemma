@@ -113,6 +113,8 @@ class TrainingConfig(BaseModel):
     logging_steps: int = Field(default=10, ge=1)
     sample_print_steps: int = Field(default=100, ge=10,
                                     description="Print a sample generation every N steps")
+    eval_dataset_size: int = Field(default=100, ge=10, le=500,
+                                    description="Val examples used for training-time eval (smaller = faster eval)")
     seed: int = 3407
 
     @field_validator("save_steps")
