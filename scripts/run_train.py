@@ -8,16 +8,23 @@ Usage:
   Full M2 run:
     python scripts/run_train.py --config configs/lora_default.yaml
 
-  Resume from latest checkpoint:
+  Resume from latest checkpoint (silently starts fresh if none exists):
     python scripts/run_train.py --config configs/lora_default.yaml --resume
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# CRITICAL: must run BEFORE any import that could transitively import unsloth.
+# See src/gemma_medical/__init__.py for the full explanation.
+# ---------------------------------------------------------------------------
+import os
+os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
+
 import argparse
 import gc
-import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Make src/ importable without `pip install -e .`
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -36,9 +43,10 @@ log = get_logger(__name__)
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a LoRA/QLoRA adapter on Gemma 4 E2B")
     p.add_argument("--config", type=str, required=True, help="Path to YAML experiment config")
-    p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume from latest checkpoint; silently starts fresh if none found")
     p.add_argument("--smoke-test", action="store_true",
-                   help="Tiny config override: 20 train steps, 10 eval samples")
+                   help="Tiny config override: ~12 train steps, 10 eval samples")
     p.add_argument("--skip-eval", action="store_true",
                    help="Skip post-training evaluation")
     p.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
@@ -163,5 +171,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from typing import Any  # noqa: E402  (only used in init_wandb's annotation)
     raise SystemExit(main())

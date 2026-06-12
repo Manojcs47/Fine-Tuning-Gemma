@@ -13,6 +13,7 @@ GPU-only.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ log = get_logger(__name__)
 def _detect_dtype_flags() -> tuple[bool, bool]:
     """Return (bf16, fp16) flags based on what the GPU supports.
 
-    T4 (Turing): no bf16 → use fp16.
+    T4 (Turing): no bf16 -> use fp16.
     A100/H100 (Ampere+): bf16 preferred.
     """
     try:
@@ -47,6 +48,28 @@ def _detect_dtype_flags() -> tuple[bool, bool]:
         return False, True
     except ImportError:
         return False, False
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_valid_checkpoint(output_dir: Path) -> bool:
+    """Return True iff `output_dir` contains at least one checkpoint-XXXX subdir.
+
+    HF Trainer raises ValueError('No valid checkpoint found ...') when
+    resume_from_checkpoint=True but the directory is empty. We detect that
+    case ourselves and fall back to a fresh run instead, since on Kaggle the
+    common workflow is: previous attempt crashed, user re-runs with --resume
+    expecting "continue if possible, start fresh otherwise".
+    """
+    if not output_dir.exists():
+        return False
+    return any(
+        p.is_dir() and p.name.startswith("checkpoint-")
+        for p in output_dir.iterdir()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +92,7 @@ def build_trainer(
     log.info("build_trainer_loading_model")
     model, tokenizer = build_model_for_experiment(cfg)
 
-# --- Data --------------------------------------------------------------
+    # --- Data --------------------------------------------------------------
     log.info("build_trainer_preparing_data")
     splits = prepare_datasets(cfg.data, tokenizer)
 
@@ -198,9 +221,31 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
     log.info("training_output_dir", path=str(output_dir))
 
+    # --- Resume safety check ----------------------------------------------
+    # If the user passed --resume but there's no checkpoint in the directory
+    # (typical after a crash on step 1), silently start fresh instead of
+    # letting HF Trainer raise ValueError. See _has_valid_checkpoint.
+    if resume and not _has_valid_checkpoint(output_dir):
+        log.warning(
+            "resume_requested_but_no_checkpoint_found",
+            path=str(output_dir),
+            action="starting_fresh_run",
+        )
+        resume = False
+
     trainer, splits, model, tokenizer = build_trainer(
         cfg, settings, output_dir, use_wandb=use_wandb
     )
+
+    # ------------------------------------------------------------------
+    # CRITICAL — re-assert UNSLOTH_RETURN_LOGITS=1 immediately before
+    # trainer.train(). See Unsloth issue #3071: the env var can be cleared
+    # by an internal Unsloth code path between package import and the call
+    # to trainer.train(). Setting it here guarantees it is "1" at the
+    # moment the first training step runs.
+    # ------------------------------------------------------------------
+    os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+    log.info("unsloth_return_logits_asserted", value=os.environ.get("UNSLOTH_RETURN_LOGITS"))
 
     log.info("training_starting", resume=resume)
     train_result = trainer.train(resume_from_checkpoint=resume if resume else None)

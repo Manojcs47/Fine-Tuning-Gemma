@@ -10,8 +10,14 @@ Usage:
 """
 from __future__ import annotations
 
-import argparse
+# ---------------------------------------------------------------------------
+# CRITICAL: must run BEFORE any import that could transitively import unsloth.
+# See src/gemma_medical/__init__.py for the full explanation.
+# ---------------------------------------------------------------------------
 import os
+os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
+
+import argparse
 import sys
 from pathlib import Path
 

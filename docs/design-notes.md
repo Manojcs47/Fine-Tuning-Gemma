@@ -63,3 +63,86 @@ with `judge_results[0..9]` (which belong to the random sample, not the first
 10). The aggregate judge metrics are correct; only the per-sample lines in
 `qualitative.md` were misaligned. Fixed in the Part 6 refactor by using the
 first N predictions for the judge as well — no random sampling.
+
+---
+
+## 2026-06-12 — M2 bug bash: three crashes between code-pull and first train step
+
+Three distinct failures, none in our code, all triggered by Unsloth 2026.6.3
++ TRL 0.24.0 + transformers 5.5.0 in the current Kaggle image. Documented
+here because each one has a different signature and is independently
+debuggable.
+
+### Crash 1 — `cannot pickle 'ConfigModuleInstance' object` (already fixed)
+
+**Where:** During `SFTTrainer._prepare_dataset` → `dataset.map(tokenize_fn, ...)`.
+
+**Why:** Unsloth's `FastModel.from_pretrained` returns a `Gemma4Processor`
+whose internals reference `torch._dynamo.config`, a `ConfigModuleInstance`
+that `dill` cannot pickle. Even with `dataset_num_proc=1` in SFTConfig,
+TRL 0.24 + datasets 3.x still triggers a `multiprocess.Pool` spawn under
+some code paths, forcing the pickle.
+
+**Fix:** `gemma_medical.data.pre_tokenize_for_training` runs the
+tokenization ourselves with `num_proc=1` (no `multiprocess.Pool` at all)
+and hands SFTTrainer a dataset that already has `input_ids` /
+`attention_mask` / `labels`. TRL detects `is_processed=True` and skips its
+own tokenization map entirely.
+
+### Crash 2 — `TypeError: 'function' object is not subscriptable`
+
+**Where:**
+```
+File ".../trl/trainer/sft_trainer.py", line 1105, in compute_loss
+    per_token_entropy = entropy_from_logits(outputs.logits)
+File ".../trl/trainer/utils.py", line 1542, in entropy_from_logits
+    original_shape = logits.shape[:-1]
+```
+
+**Why:** Unsloth's cut-cross-entropy optimization computes the loss directly
+from hidden states and never materializes the full `[batch × seq × vocab]`
+logits tensor. To preserve the HF API surface, `outputs.logits` is set to
+an `EmptyLogits` placeholder whose `.shape` is a *method*, not a property.
+TRL ≥ 0.20 added per-token entropy logging in `compute_loss`, calling
+`entropy_from_logits(outputs.logits)` → `logits.shape[:-1]`. On the
+placeholder, that errors as shown above.
+
+**Fix:** Set `UNSLOTH_RETURN_LOGITS=1` *before* any Unsloth import. This is
+the documented Unsloth workaround (see
+`unsloth/models/_utils.py` and the Unsloth env-flags docs). It forces
+Unsloth to materialize real logits tensors, trading a few hundred MB of
+VRAM for compatibility with TRL's entropy logging path.
+
+Applied in **four** places (defense in depth, because Unsloth issue #3071
+reports the env var occasionally getting cleared during training):
+
+1. `src/gemma_medical/__init__.py` — set at first package import
+2. `scripts/run_train.py` — set at file-top, before any `from gemma_medical` imports
+3. `scripts/run_baseline.py` and `scripts/run_eval.py` — same
+4. `src/gemma_medical/train.py:run_training` — re-asserted immediately
+   before `trainer.train()`
+
+### Crash 3 — `ValueError: No valid checkpoint found in output directory`
+
+**Where:** `transformers.Trainer.train(resume_from_checkpoint=True)` on a
+directory that exists but contains no `checkpoint-*` subdirs.
+
+**Why:** After crash 2 fired on step 1, no checkpoint was ever written.
+Re-running with `--resume` then triggered Trainer's strict resume check.
+
+**Fix:** `gemma_medical.train._has_valid_checkpoint(output_dir)` now scans
+for `checkpoint-*` subdirs. If `--resume` was requested but none exist,
+the script logs a warning and silently starts a fresh run. Matches the
+Kaggle workflow expectation: "continue if possible, start fresh otherwise."
+
+### What we did NOT do (and why)
+
+- **Pin TRL to an older version.** Unsloth 2026.6.3's deps require
+  `trl>=0.18.2,<=0.24.0,!=0.19.0`, so we could pin to 0.18.2 to predate
+  the entropy code path. Rejected: this fragility cuts off later TRL
+  features (chunked NLL, batch eval metrics) and silently encourages
+  copying old code into the future. The env var is a 1-line, targeted
+  workaround.
+- **Disable entropy at the SFTConfig level.** Current TRL has no clean
+  flag for this (entropy logging is woven into `compute_loss`), so the
+  cleanest knob is on the Unsloth side.
