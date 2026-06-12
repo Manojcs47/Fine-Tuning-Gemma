@@ -101,8 +101,16 @@ class TrainingConfig(BaseModel):
     """Optimizer + scheduler + batching."""
 
     learning_rate: float = Field(default=2e-4, gt=0, le=1e-2)
-    per_device_train_batch_size: int = Field(default=2, ge=1, le=16)
-    gradient_accumulation_steps: int = Field(default=4, ge=1, le=64)
+    # Per-device batch sizing. On T4 with UNSLOTH_RETURN_LOGITS=1, train batch must
+    # stay at 1 (see configs/lora_default.yaml batch sizing note). eval batch
+    # defaults to None which means "match train"; setting it explicitly avoids
+    # TrainingArguments' default of 8 (which would OOM at the first eval).
+    per_device_train_batch_size: int = Field(default=1, ge=1, le=16)
+    per_device_eval_batch_size: int | None = Field(
+        default=None, ge=1, le=16,
+        description="Defaults to per_device_train_batch_size if None.",
+    )
+    gradient_accumulation_steps: int = Field(default=8, ge=1, le=64)
     num_train_epochs: float = Field(default=1.0, gt=0, le=10)
     warmup_ratio: float = Field(default=0.05, ge=0.0, le=0.5)
     weight_decay: float = Field(default=0.01, ge=0.0, le=0.5)
@@ -121,6 +129,11 @@ class TrainingConfig(BaseModel):
     @classmethod
     def save_steps_multiple_of_eval_steps(cls, v: int, info: object) -> int:
         return v
+
+    @property
+    def effective_eval_batch_size(self) -> int:
+        """`per_device_eval_batch_size` falling back to `per_device_train_batch_size`."""
+        return self.per_device_eval_batch_size or self.per_device_train_batch_size
 
 
 class EarlyStoppingConfig(BaseModel):

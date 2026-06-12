@@ -66,14 +66,13 @@ first N predictions for the judge as well — no random sampling.
 
 ---
 
-## 2026-06-12 — M2 bug bash: three crashes between code-pull and first train step
+## 2026-06-12 — M2 bug bash: four crashes between code-pull and first train step
 
-Three distinct failures, none in our code, all triggered by Unsloth 2026.6.3
-+ TRL 0.24.0 + transformers 5.5.0 in the current Kaggle image. Documented
-here because each one has a different signature and is independently
-debuggable.
+Four distinct failures, all triggered by the Unsloth 2026.6.x + TRL 0.24.0 +
+transformers 5.5.0 + T4 combination in the current Kaggle image. Documented
+here because each has a different signature and is independently debuggable.
 
-### Crash 1 — `cannot pickle 'ConfigModuleInstance' object` (already fixed)
+### Crash 1 — `cannot pickle 'ConfigModuleInstance' object` (fixed earlier)
 
 **Where:** During `SFTTrainer._prepare_dataset` → `dataset.map(tokenize_fn, ...)`.
 
@@ -107,14 +106,12 @@ TRL ≥ 0.20 added per-token entropy logging in `compute_loss`, calling
 `entropy_from_logits(outputs.logits)` → `logits.shape[:-1]`. On the
 placeholder, that errors as shown above.
 
-**Fix:** Set `UNSLOTH_RETURN_LOGITS=1` *before* any Unsloth import. This is
-the documented Unsloth workaround (see
-`unsloth/models/_utils.py` and the Unsloth env-flags docs). It forces
-Unsloth to materialize real logits tensors, trading a few hundred MB of
-VRAM for compatibility with TRL's entropy logging path.
+**Fix:** Set `UNSLOTH_RETURN_LOGITS=1` before any Unsloth import. Forces
+Unsloth to materialize real logits tensors, trading memory for
+compatibility with TRL's entropy logging path.
 
-Applied in **four** places (defense in depth, because Unsloth issue #3071
-reports the env var occasionally getting cleared during training):
+Applied in **four** places (defense in depth — Unsloth issue #3071 reports
+the env var occasionally getting cleared during training):
 
 1. `src/gemma_medical/__init__.py` — set at first package import
 2. `scripts/run_train.py` — set at file-top, before any `from gemma_medical` imports
@@ -135,14 +132,69 @@ for `checkpoint-*` subdirs. If `--resume` was requested but none exist,
 the script logs a warning and silently starts a fresh run. Matches the
 Kaggle workflow expectation: "continue if possible, start fresh otherwise."
 
+### Crash 4 — `torch.OutOfMemoryError` in `convert_to_fp32` (3.04 GiB)
+
+**Where:**
+```
+File ".../accelerate/utils/operations.py", line 902, in _convert_to_fp32
+    return tensor.float()
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 3.04 GiB.
+```
+
+**Why:** Crash 2's fix (`UNSLOTH_RETURN_LOGITS=1`) has a cost: Unsloth now
+materializes the full `[batch × seq × vocab]` logits tensor. T4 doesn't
+support bf16 so we're using fp16 autocast, which means accelerate wraps the
+model's forward with `ConvertOutputsToFp32`. That wrapper upcasts the
+logits to fp32 on the way out — doubling the tensor's memory at exactly
+the moment when activations + gradients + 8-bit optimizer + 5.1 B model
+params are all already resident.
+
+For Gemma 4 E2B at `per_device_batch_size=4, seq_len=2048`, the fp32
+conversion needs ~3 GiB of additional contiguous memory. Free VRAM at that
+point is ~2.9 GiB. Overflow.
+
+The YAML had `per_device_train_batch_size: 2`, but the runtime kept
+reporting batch=4 — turned out the Kaggle copy of the YAML had been
+edited locally. The 4 ↔ 2 ↔ 1 difference doesn't help much when the
+fp32 conversion of the logits is the dominant non-model memory cost: 4 →
+~3 GiB, 2 → ~1.5 GiB, 1 → ~0.76 GiB. Only 1 reliably fits.
+
+**Fix:** Three changes, in priority order:
+
+1. **`per_device_train_batch_size: 1`** + **`gradient_accumulation_steps: 8`**
+   in both `configs/lora_default.yaml` and `configs/qlora_default.yaml`.
+   Effective batch stays at 8, peak VRAM drops by ~75%.
+2. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** set in
+   `__init__.py` and at the top of every script. The CUDA OOM error
+   message itself recommends this — the PyTorch caching allocator coalesces
+   free segments instead of holding fragmented "available but unusable"
+   chunks.
+3. **`per_device_eval_batch_size`** wired as an explicit config field with
+   sensible default fallback to `per_device_train_batch_size`.
+   `TrainingArguments` defaults to 8 if unset; at batch=8/seq=2048/fp32 the
+   eval logits tensor alone is ~17 GiB — the first eval would OOM even if
+   training was fine.
+
+A `_free_cuda_memory()` call (gc + `torch.cuda.empty_cache()`) was also
+added immediately before `trainer.train()` so any cached allocations from
+dataset prep are released before the first training step competes for VRAM.
+
 ### What we did NOT do (and why)
 
-- **Pin TRL to an older version.** Unsloth 2026.6.3's deps require
-  `trl>=0.18.2,<=0.24.0,!=0.19.0`, so we could pin to 0.18.2 to predate
-  the entropy code path. Rejected: this fragility cuts off later TRL
+- **Pin TRL to an older version.** Unsloth 2026.6.x deps require
+  `trl>=0.18.2,<=0.24.0,!=0.19.0`. We could pin to 0.18.2 to predate the
+  entropy logging code path. Rejected: this fragility cuts off later TRL
   features (chunked NLL, batch eval metrics) and silently encourages
-  copying old code into the future. The env var is a 1-line, targeted
-  workaround.
-- **Disable entropy at the SFTConfig level.** Current TRL has no clean
-  flag for this (entropy logging is woven into `compute_loss`), so the
-  cleanest knob is on the Unsloth side.
+  copying old code into the future.
+- **Use `loss_type="chunked_nll"`.** TRL has a memory-efficient loss type
+  that chunks the LM-head matmul. Considered but rejected: chunked_nll
+  also avoids materializing the full logits tensor, which means
+  `outputs.logits` would again be empty/placeholder — bringing back crash
+  2. The combination doesn't compose cleanly.
+- **Disable mixed precision.** Setting `fp16=False, bf16=False` would skip
+  the fp32 conversion entirely. Rejected: the model itself would then run
+  in full fp32, which would OOM the moment it's loaded (~20 GiB vs T4's
+  ~14.5 GiB).
+- **Reduce `max_seq_length` from 2048 → 1024.** Would help linearly with
+  memory, but ~30% of the medical CoT chains in this dataset are >1024
+  tokens. Kept at 2048 since batch=1 already fits.

@@ -5,6 +5,13 @@ notes: |
   M2 first LoRA fine-tune. Sensible defaults, single epoch, no sweep.
   Acceptance: trains without OOM, loss decreases monotonically after warmup.
 
+  Batch sizing note (2026-06-12):
+  Per-device batch is 1 (not 2 or 4) because UNSLOTH_RETURN_LOGITS=1 forces
+  the full [batch x seq x vocab] logits tensor to be materialized, and on
+  T4 (fp16 autocast) accelerate then upcasts it to fp32 — doubling memory.
+  Per-device 1 + grad-accum 8 gives the same effective batch as the
+  original setting (1 x 8 = 8) while staying inside T4's VRAM budget.
+
 model:
   base_model: unsloth/gemma-4-E2B-it
   max_seq_length: 2048
@@ -36,8 +43,9 @@ data:
 
 training:
   learning_rate: 2.0e-4
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 4
+  per_device_train_batch_size: 1     # was 2 — see batch sizing note above
+  per_device_eval_batch_size: 1      # match train, otherwise default 8 OOMs at eval
+  gradient_accumulation_steps: 8     # was 4 — compensate to keep effective batch=8
   num_train_epochs: 1.0
   warmup_ratio: 0.05
   weight_decay: 0.01

@@ -11,11 +11,12 @@ Usage:
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: must run BEFORE any import that could transitively import unsloth.
-# See src/gemma_medical/__init__.py for the full explanation.
+# CRITICAL: env-var setdefaults must run BEFORE any import that could
+# transitively import unsloth or initialize CUDA.
 # ---------------------------------------------------------------------------
 import os
 os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
 import sys

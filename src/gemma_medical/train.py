@@ -13,6 +13,7 @@ GPU-only.
 """
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,36 @@ def _has_valid_checkpoint(output_dir: Path) -> bool:
         p.is_dir() and p.name.startswith("checkpoint-")
         for p in output_dir.iterdir()
     )
+
+
+# ---------------------------------------------------------------------------
+# Memory hygiene
+# ---------------------------------------------------------------------------
+
+
+def _free_cuda_memory() -> None:
+    """Run gc + torch.cuda.empty_cache and log before/after.
+
+    Called right before trainer.train() so any cached allocations from model
+    loading, dataset tokenization, etc. are released before the first
+    training step competes for VRAM with the materialized logits tensor.
+    """
+    try:
+        import torch  # type: ignore[import-not-found]
+        if not torch.cuda.is_available():
+            return
+        before_free, total = torch.cuda.mem_get_info()
+        gc.collect()
+        torch.cuda.empty_cache()
+        after_free, _ = torch.cuda.mem_get_info()
+        log.info(
+            "cuda_memory_freed",
+            free_gb_before=round(before_free / 1e9, 2),
+            free_gb_after=round(after_free / 1e9, 2),
+            total_gb=round(total / 1e9, 2),
+        )
+    except (ImportError, RuntimeError) as e:
+        log.warning("free_cuda_memory_failed", error=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +164,27 @@ def build_trainer(
     #   is_processed=True and skips the broken tokenization map. This setting
     #   protects any subsequent map calls (EOS append, truncate) that don't
     #   drag the Dynamo config into their closures.
+    #
+    # NOTE on `per_device_eval_batch_size`:
+    #   If not set, TrainingArguments defaults to 8 — which OOMs at the first
+    #   eval on T4 (the fp32 logits tensor at batch=8, seq=2048 is ~17 GB).
+    #   We fall back to the train batch when the YAML doesn't specify one.
+    eval_batch = cfg.training.effective_eval_batch_size
+    log.info(
+        "batch_sizes",
+        per_device_train=cfg.training.per_device_train_batch_size,
+        per_device_eval=eval_batch,
+        gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
+        effective_train_batch=(
+            cfg.training.per_device_train_batch_size
+            * cfg.training.gradient_accumulation_steps
+        ),
+    )
+
     sft_args = SFTConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
+        per_device_eval_batch_size=eval_batch,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
         warmup_ratio=cfg.training.warmup_ratio,
         num_train_epochs=cfg.training.num_train_epochs,
@@ -245,7 +294,15 @@ def run_training(
     # moment the first training step runs.
     # ------------------------------------------------------------------
     os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
-    log.info("unsloth_return_logits_asserted", value=os.environ.get("UNSLOTH_RETURN_LOGITS"))
+    log.info(
+        "training_env_check",
+        UNSLOTH_RETURN_LOGITS=os.environ.get("UNSLOTH_RETURN_LOGITS"),
+        PYTORCH_CUDA_ALLOC_CONF=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    )
+
+    # Free any cached allocations from dataset prep before the first
+    # training step competes for VRAM with the materialized logits tensor.
+    _free_cuda_memory()
 
     log.info("training_starting", resume=resume)
     train_result = trainer.train(resume_from_checkpoint=resume if resume else None)

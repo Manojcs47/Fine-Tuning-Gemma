@@ -5,6 +5,9 @@ notes: |
   M4 QLoRA comparison. Identical to lora_default.yaml except 4-bit quantization.
   Used to quantify the quality/memory trade-off of 4-bit.
 
+  Batch sizing matches lora_default.yaml even though QLoRA has more memory
+  headroom — keeps the comparison clean (effective batch=8 both ways).
+
 model:
   base_model: unsloth/gemma-4-E2B-it
   max_seq_length: 2048
@@ -36,8 +39,9 @@ data:
 
 training:
   learning_rate: 2.0e-4
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 4
+  per_device_train_batch_size: 1     # was 2 — see lora_default.yaml batch sizing note
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8     # was 4 — compensate to keep effective batch=8
   num_train_epochs: 1.0
   warmup_ratio: 0.05
   weight_decay: 0.01
