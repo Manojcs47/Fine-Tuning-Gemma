@@ -69,13 +69,25 @@ def build_trainer(
     log.info("build_trainer_loading_model")
     model, tokenizer = build_model_for_experiment(cfg)
 
-    # --- Data --------------------------------------------------------------
+# --- Data --------------------------------------------------------------
     log.info("build_trainer_preparing_data")
     splits = prepare_datasets(cfg.data, tokenizer)
 
-    # Subset the val set used for in-training eval (keeps eval fast).
+    # Pre-tokenize train + eval so SFTTrainer treats them as `is_processed`
+    # and skips its own tokenization map call. See
+    # gemma_medical.data.pre_tokenize_for_training for the full story —
+    # this is what actually fixes the dill ConfigModuleInstance crash.
+    from gemma_medical.data import pre_tokenize_for_training
+
+    train_tokenized = pre_tokenize_for_training(
+        splits.train, tokenizer, max_length=cfg.model.max_seq_length
+    )
+
     n_eval = min(cfg.training.eval_dataset_size, len(splits.val))
     eval_subset = splits.val.select(range(n_eval))
+    eval_tokenized = pre_tokenize_for_training(
+        eval_subset, tokenizer, max_length=cfg.model.max_seq_length
+    )
     log.info("eval_subset_size", n=n_eval, full_val=len(splits.val))
 
     # --- SFTConfig ---------------------------------------------------------
@@ -89,16 +101,15 @@ def build_trainer(
     #   - SFTTrainer's `tokenizer=` kwarg was renamed to `processing_class=`.
     #
     # NOTE on `dataset_num_proc=1`:
-    #   Unsloth's fast-tokenizer patches transitively reference
-    #   `torch._dynamo.config.ConfigModuleInstance`, which `dill` cannot pickle.
-    #   When TRL's `_prepare_dataset` calls `dataset.map(..., num_proc=N)` with
-    #   N>1, multiprocess workers fail with:
-    #       TypeError: cannot pickle 'ConfigModuleInstance' object
-    #   The crash happens on the "Tokenizing train dataset" step specifically
-    #   (not on "Adding EOS" or our own chat-template step, both of which use
-    #   pure-Python paths that don't drag in the Dynamo config).
-    #   Running TRL's tokenization in-process sidesteps pickling entirely.
-    #   Cost: ~30-60s of extra wall-clock once per run; results are cached.
+    #   Defense in depth only — the real fix is the pre-tokenization above.
+    #   Unsloth's tokenizer references torch._dynamo.config.ConfigModuleInstance,
+    #   which dill cannot pickle. Setting dataset_num_proc=1 here is NOT enough
+    #   on its own: TRL/datasets still spawn a multiprocess.Pool in some code
+    #   paths regardless of this setting. We sidestep the whole problem by
+    #   feeding SFTTrainer a dataset that already has input_ids — TRL detects
+    #   is_processed=True and skips the broken tokenization map. This setting
+    #   protects any subsequent map calls (EOS append, truncate) that don't
+    #   drag the Dynamo config into their closures.
     sft_args = SFTConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
@@ -160,9 +171,9 @@ def build_trainer(
     # `tokenizer=` was renamed to `processing_class=` in TRL >= 0.16.
     trainer = SFTTrainer(
         model=model,
-        processing_class=tokenizer,            # was: tokenizer=tokenizer
-        train_dataset=splits.train,
-        eval_dataset=eval_subset,
+        processing_class=tokenizer,
+        train_dataset=train_tokenized,     # was: splits.train
+        eval_dataset=eval_tokenized,        # was: eval_subset
         args=sft_args,
         callbacks=callbacks,
     )

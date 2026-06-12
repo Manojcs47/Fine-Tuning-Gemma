@@ -200,3 +200,68 @@ def prepare_datasets(
     val_fmt = apply_chat_template_to_dataset(raw_splits.val, tokenizer)
 
     return Splits(train=train_fmt, val=val_fmt, test=raw_splits.test)
+    
+def pre_tokenize_for_training(
+    ds: Dataset,
+    tokenizer: Any,
+    max_length: int = 2048,
+) -> Dataset:
+    """Tokenize a chat-templated dataset in-process so SFTTrainer skips its own
+    (broken) multiprocess tokenization step.
+
+    Why this exists
+    ----------------
+    Unsloth's FastModel returns a `Gemma4Processor` that has been monkey-patched
+    to reference `torch._dynamo.config` internally. `dill` cannot pickle that
+    config object, so any code path that tries to pickle the tokenizer dies with:
+        TypeError: cannot pickle 'ConfigModuleInstance' object
+
+    TRL's `SFTTrainer._prepare_dataset` calls
+        dataset.map(tokenize_fn, num_proc=args.dataset_num_proc, ...)
+    for tokenization. Even with `dataset_num_proc=1` the call chain still
+    spins up a `multiprocess.Pool` in TRL 0.20.x + datasets 3.x, which forces
+    the pickle attempt. Setting it to 1 or None in SFTConfig is therefore NOT
+    sufficient on its own.
+
+    The fix is to never let TRL tokenize. We do it ourselves with `num_proc=1`
+    (no multiprocess at all), produce a dataset that already has `input_ids`,
+    `attention_mask`, and `labels`, and pass that to SFTTrainer. TRL detects
+    `is_processed=True` from the column names and skips the tokenization map
+    entirely.
+
+    Args:
+        ds: dataset with a `text` column (output of apply_chat_template_to_dataset).
+        tokenizer: the Gemma4Processor / HF tokenizer from Unsloth's FastModel.
+        max_length: truncation length matching cfg.model.max_seq_length.
+
+    Returns:
+        Dataset with `input_ids`, `attention_mask`, and `labels` columns.
+        Original columns are removed.
+    """
+    log.info("pre_tokenizing", n=len(ds), max_length=max_length)
+
+    def tokenize_fn(batch: dict[str, list[str]]) -> dict[str, list[list[int]]]:
+        # Pass text= as keyword: Gemma4Processor.__call__ binds positional args
+        # to images=, not text=. add_special_tokens=False because Gemma's chat
+        # template already emits <bos> at the start.
+        enc = tokenizer(
+            text=batch["text"],
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_tensors=None,
+        )
+        # SFT: labels are the same as input_ids; the data collator will mask
+        # padding to -100 at batch time.
+        enc["labels"] = [list(ids) for ids in enc["input_ids"]]
+        return enc
+
+    return ds.map(
+        tokenize_fn,
+        batched=True,
+        batch_size=64,
+        num_proc=1,            # MUST be 1 — see docstring
+        remove_columns=ds.column_names,
+        desc="pre-tokenizing",
+    )
