@@ -104,6 +104,14 @@ class SamplePrinterCallback(TrainerCallback):
         return control
 
     def _print_one_sample(self, model: Any, step: int) -> None:
+        """Generate one validation sample and print it.
+
+        Memory hygiene: KV cache and intermediate tensors from generate() can
+        linger in PyTorch's caching allocator and starve the next training
+        step. We explicitly del every tensor created here and call
+        empty_cache() before returning, so the next step gets a clean slate.
+        """
+        import gc
         import torch  # type: ignore[import-not-found]
 
         idx = self._call_count % self.n_rotate
@@ -117,22 +125,23 @@ class SamplePrinterCallback(TrainerCallback):
         # IMPORTANT: pass text as a keyword arg. Unsloth Zoo patches
         # Gemma4Processor.__call__ to `(images=None, text=None, videos=None,
         # **kwargs)`, so a positional `tokenizer(prompt, ...)` binds `prompt`
-        # to `images` and the processor explodes inside its image branch.
+        # to `images`.
         inputs = self.tokenizer(
             text=prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=2048,
+            max_length=1024,
         ).to(model.device)
 
-        # Read special-token IDs from the inner text tokenizer (the processor
-        # does not always expose them directly).
         inner = _text_tokenizer(self.tokenizer)
         pad_id = getattr(inner, "pad_token_id", None) or getattr(inner, "eos_token_id", None)
         eos_id = getattr(inner, "eos_token_id", None)
 
         was_training = model.training
         model.eval()
+        outputs = None
+        new_tokens = None
+        raw = ""
         try:
             with torch.no_grad():
                 outputs = model.generate(
@@ -145,8 +154,24 @@ class SamplePrinterCallback(TrainerCallback):
             new_tokens = outputs[:, inputs["input_ids"].shape[1]:]
             raw = self.tokenizer.decode(new_tokens[0], skip_special_tokens=True).strip()
         finally:
+            # Free everything created during inference BEFORE returning
+            # control to the training loop. Without this the KV cache and
+            # logits/output tensors stay in the caching allocator and
+            # starve the next training step (observed: step 11 OOM after
+            # sample printer fired at step 10).
+            try:
+                del inputs
+                if outputs is not None:
+                    del outputs
+                if new_tokens is not None:
+                    del new_tokens
+            except NameError:
+                pass
             if was_training:
                 model.train()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         reasoning, answer = parse_response(raw)
 
@@ -161,7 +186,6 @@ class SamplePrinterCallback(TrainerCallback):
             print(f"\n[parsed reasoning: {len(reasoning)} chars]")
         print(f"[parsed answer: {len(answer)} chars]")
         print("─" * 60 + "\n")
-
 
 # ---------------------------------------------------------------------------
 # Memory monitor
