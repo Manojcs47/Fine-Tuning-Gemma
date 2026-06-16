@@ -1,26 +1,36 @@
 """Train a Gemma 4 E2B LoRA/QLoRA adapter and (optionally) evaluate it.
 
 Usage:
-  Smoke test (very few steps, very few eval samples):
-    python scripts/run_train.py --config configs/lora_default.yaml \\
-        --smoke-test
+  Smoke test:
+    !PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python \\
+        scripts/run_train.py --config configs/lora_default.yaml --smoke-test
 
   Full M2 run:
-    python scripts/run_train.py --config configs/lora_default.yaml
+    !PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python \\
+        scripts/run_train.py --config configs/lora_default.yaml
 
   Resume from latest checkpoint (silently starts fresh if none exists):
-    python scripts/run_train.py --config configs/lora_default.yaml --resume
+    !PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python \\
+        scripts/run_train.py --config configs/lora_default.yaml --resume
+
+The shell-inline `PYTORCH_CUDA_ALLOC_CONF=...` is the authoritative way to
+set this — Python-side setting can be undone by Unsloth's package init
+before PyTorch's CUDA allocator initializes.
 """
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: env-var setdefaults must run BEFORE any import that could
-# transitively import unsloth or initialize CUDA. See
-# src/gemma_medical/__init__.py for the full explanation of each one.
+# CRITICAL: force-set env vars before ANY import that could transitively
+# import torch or unsloth. We use direct assignment (not setdefault) because
+# Unsloth's package init can clear these — see src/gemma_medical/__init__.py
+# for the full story. This script-level assignment is belt-and-suspenders;
+# the canonical place to set PYTORCH_CUDA_ALLOC_CONF is at the shell level
+# (in the !python command), since that's the only thing PyTorch sees
+# guaranteed-before allocator initialization.
 # ---------------------------------------------------------------------------
 import os
-os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import gc

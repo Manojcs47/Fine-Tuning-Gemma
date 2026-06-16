@@ -5,21 +5,19 @@ notes: |
   M2 first LoRA fine-tune. Sensible defaults, single epoch, no sweep.
   Acceptance: trains without OOM, loss decreases monotonically after warmup.
 
-  Batch sizing note (2026-06-12):
-  Per-device batch is 1 because UNSLOTH_RETURN_LOGITS=1 forces the full
-  [batch x seq x vocab] logits tensor to be materialized, and on T4 (fp16
-  autocast) accelerate then upcasts it to fp32 — doubling memory. Per-device
-  1 + grad-accum 8 gives effective batch=8.
+  Context length note (2026-06-12):
+  max_seq_length is 768 (was 1024, was 2048). On Kaggle T4 with Gemma 4 E2B
+  at fp16 (~10.3 GB base weights) + Unsloth's UNSLOTH_RETURN_LOGITS=1 forcing
+  the full [B, S, 262144] logits tensor + fp32 upcast in eval, anything
+  above 768 puts us at the absolute VRAM ceiling and fragmentation OOMs
+  within 10 training steps. 768 covers >95% of medical-o1 examples after
+  chat-templating; the remainder are truncated cleanly.
 
-  Context length note (2026-06-12 — OOM fix):
-  max_seq_length is 1024 not 2048. With Gemma 4's 262K vocab, the eval-time
-  logits tensor at seq=2048 + fp32 conversion exceeds T4's headroom and OOMs
-  at the first eval. seq=1024 fits with margin, and >95% of medical-o1
-  Question+CoT+Response triples fit in 1024 tokens after templating.
+  Batch sizing: per_device=1 + grad_accum=8 → effective batch 8.
 
 model:
   base_model: unsloth/gemma-4-E2B-it
-  max_seq_length: 1024              # was 2048 — see context length note above
+  max_seq_length: 768               # was 1024 — see note above
   load_in_4bit: false
   full_finetuning: false
 
@@ -61,8 +59,8 @@ training:
   logging_steps: 10
   sample_print_steps: 100
   eval_dataset_size: 100
-  eval_accumulation_steps: 1        # stream logits to CPU per eval batch
-  disable_intraining_eval: false    # smoke test overrides this to true
+  eval_accumulation_steps: 1
+  disable_intraining_eval: false
   seed: 3407
 
 early_stopping:
