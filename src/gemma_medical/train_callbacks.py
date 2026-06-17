@@ -130,35 +130,56 @@ class SamplePrinterCallback(TrainerCallback):
             text=prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=1024,
+            max_length=768,
         ).to(model.device)
 
         inner = _text_tokenizer(self.tokenizer)
         pad_id = getattr(inner, "pad_token_id", None) or getattr(inner, "eos_token_id", None)
         eos_id = getattr(inner, "eos_token_id", None)
 
+        # CRITICAL memory hygiene — the reason the smoke test OOM'd at step 11.
+        #
+        # generate() on an Unsloth model allocates a static inference cache
+        # (KV cache + workspace), several GB for a 5B model. Plain
+        # `model.eval()` / `model.train()` only flips the nn.Module training
+        # flag; it does NOT release that cache. So after the sample printed at
+        # step 10 the cache stayed *live* (not merely reserved — empty_cache()
+        # can't touch it), leaving ~18 MB free, and the step-11 forward OOM'd.
+        #
+        # `FastModel.for_inference(model)` is the supported way to enter
+        # generation mode, and `FastModel.for_training(model)` tears the
+        # inference cache back down and restores the training state (gradient
+        # checkpointing, use_cache=False, requires_grad on the LoRA params).
+        # inference.py uses the same for_inference path. This is what lets a
+        # 16-bit-LoRA 5B model keep printing samples on a 16 GB T4.
+        from unsloth import FastModel  # type: ignore[import-not-found]
+
         was_training = model.training
-        model.eval()
         outputs = None
         new_tokens = None
         raw = ""
+
+        try:
+            FastModel.for_inference(model)
+        except Exception:
+            model.eval()
+
         try:
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
+                    use_cache=True,
                     pad_token_id=pad_id,
                     eos_token_id=eos_id,
                 )
             new_tokens = outputs[:, inputs["input_ids"].shape[1]:]
             raw = self.tokenizer.decode(new_tokens[0], skip_special_tokens=True).strip()
         finally:
-            # Free everything created during inference BEFORE returning
-            # control to the training loop. Without this the KV cache and
-            # logits/output tensors stay in the caching allocator and
-            # starve the next training step (observed: step 11 OOM after
-            # sample printer fired at step 10).
+            # Order matters: drop our own references first, then for_training()
+            # (which frees Unsloth's inference cache), then empty_cache() to
+            # return the now-free blocks to the allocator before the next step.
             try:
                 del inputs
                 if outputs is not None:
@@ -167,8 +188,11 @@ class SamplePrinterCallback(TrainerCallback):
                     del new_tokens
             except NameError:
                 pass
-            if was_training:
-                model.train()
+            try:
+                FastModel.for_training(model)
+            except Exception:
+                if was_training:
+                    model.train()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

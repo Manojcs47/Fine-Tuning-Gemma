@@ -5,21 +5,30 @@ notes: |
   M2 first LoRA fine-tune. Sensible defaults, single epoch, no sweep.
   Acceptance: trains without OOM, loss decreases monotonically after warmup.
 
-  Context length note (2026-06-16):
-  max_seq_length is 1024 (was briefly dropped to 768). Earlier the run forced
-  Unsloth to materialize the full [B, S, 262144] logits tensor (via
-  UNSLOTH_RETURN_LOGITS=1), which at any length above ~768 sat at the T4 VRAM
-  ceiling and OOM'd within ~10 steps. That env var has been removed: loss is
-  now computed through Unsloth's fused, logit-free cross-entropy (see
-  gemma_medical.train._MemoryEfficientSFTTrainer), which frees ~3 GB of
-  steady-state VRAM. 1024 fits comfortably and captures the long medical CoT
-  answers more faithfully; the rare longer example is truncated cleanly.
+  Context length note (2026-06-17):
+  max_seq_length is 768. The model is a 5.15B-param Gemma 4 E2B loaded in
+  fp16 (~10.3 GB) on a single 14.56 GB Tesla T4, which leaves only ~4 GB for
+  activations, optimizer state, and — the tight part — the in-training sample
+  generation. Pure training steps fit, but every token of extra context grows
+  both the activation footprint and the generation KV cache, so 768 is the
+  safe ceiling for 16-bit LoRA on a T4. (The QLoRA config raises this to 2048
+  because 4-bit weights free ~7 GB; that's the M4 experiment, not this one.)
+
+  The smaller-context tradeoff is mild: 768 tokens covers the large majority of
+  medical-o1 examples after chat-templating; the rest are truncated cleanly.
+
+  Memory correctness note: an earlier revision forced full logits via
+  UNSLOTH_RETURN_LOGITS=1 and a later one removed it. Removing it was right (it
+  avoids the entropy-logging crash without an env hack — see
+  gemma_medical.train._MemoryEfficientSFTTrainer), but profiling showed it did
+  NOT free meaningful steady-state VRAM, so max_seq_length stays at 768 rather
+  than the 1024 a previous note optimistically assumed.
 
   Batch sizing: per_device=1 + grad_accum=8 → effective batch 8.
 
 model:
   base_model: unsloth/gemma-4-E2B-it
-  max_seq_length: 1024              # restored from 768 — see note above
+  max_seq_length: 768               # 16-bit LoRA on a T4 — see note above
   load_in_4bit: false
   full_finetuning: false
 
