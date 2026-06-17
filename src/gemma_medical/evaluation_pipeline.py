@@ -179,11 +179,22 @@ def run_evaluation(
     if not skip_perplexity and val_split_for_perplexity is not None:
         n_ppl = min(eval_cfg.perplexity_samples, len(val_split_for_perplexity))
         val_subset = val_split_for_perplexity.select(range(n_ppl))
-        val_formatted = apply_chat_template_to_dataset(val_subset, tokenizer, num_proc=1)
+        # `splits.val` is ALREADY chat-templated by prepare_datasets (it has a
+        # 'text' column, and Question/Complex_CoT/Response were stripped). Only
+        # apply the template if it hasn't been done — re-applying calls
+        # format_example, which needs the raw 'Question' column that no longer
+        # exists, raising KeyError: 'Question'.
+        if "text" in val_subset.column_names:
+            texts = [row["text"] for row in val_subset]
+        else:
+            val_formatted = apply_chat_template_to_dataset(
+                val_subset, tokenizer, num_proc=1
+            )
+            texts = [row["text"] for row in val_formatted]
         log.info("eval_phase_3_perplexity", tag=tag, n=n_ppl)
         perplexity = compute_perplexity(
             model, tokenizer,
-            texts=[row["text"] for row in val_formatted],
+            texts=texts,
             max_length=max_seq_length,
         )
 

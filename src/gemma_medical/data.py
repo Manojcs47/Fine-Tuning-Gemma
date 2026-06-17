@@ -117,14 +117,29 @@ def build_messages(question: str, cot: str, response: str) -> list[dict[str, str
 
 
 def format_example(example: dict[str, Any], tokenizer: _TokenizerLike) -> dict[str, str]:
-    """Render one example to a single string via Gemma's chat template."""
+    """Render one example via Gemma's chat template.
+
+    Returns both the full text (prompt + assistant turn) and the prompt-only
+    text (user turn + generation prompt). The prompt is used by
+    pre_tokenize_for_training to mask prompt tokens out of the labels so loss
+    is computed on the assistant response only (completion-only SFT). Without
+    that masking the model is trained to predict the question too, whose loss
+    is largely irreducible — the training loss then plateaus and gradients
+    vanish once the response format is learned.
+    """
     messages = build_messages(
         example["Question"], example["Complex_CoT"], example["Response"]
     )
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=False
     )
-    return {"text": text}
+    # Prompt prefix = user turn + the "<start_of_turn>model" generation prompt.
+    # This is exactly the prefix of `text` that precedes the assistant content.
+    prompt_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": example["Question"].strip()}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    return {"text": text, "prompt_text": prompt_text}
 
 
 def format_for_inference(question: str, tokenizer: _TokenizerLike) -> str:
@@ -252,9 +267,37 @@ def pre_tokenize_for_training(
             padding=False,
             return_tensors=None,
         )
-        # SFT: labels are the same as input_ids; the data collator will mask
-        # padding to -100 at batch time.
-        enc["labels"] = [list(ids) for ids in enc["input_ids"]]
+
+        # Completion-only labels: copy input_ids, then mask the prompt prefix to
+        # -100 so loss is computed only on the assistant response. `prompt_text`
+        # (from format_example) is exactly the prefix of `text`, so tokenizing
+        # it with the same options gives the prompt length to mask.
+        if "prompt_text" in batch:
+            prompt_enc = tokenizer(
+                text=batch["prompt_text"],
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_length,
+                padding=False,
+                return_tensors=None,
+            )
+            labels: list[list[int]] = []
+            for ids, p_ids in zip(enc["input_ids"], prompt_enc["input_ids"]):
+                lab = list(ids)
+                p_len = len(p_ids)
+                # Only mask when there is at least one response token left after
+                # the prompt. If truncation left no completion (p_len >= len),
+                # keep full labels so the row still contributes a loss and we
+                # never emit an all-(-100) row (which would make the batch loss
+                # NaN).
+                if 0 < p_len < len(lab):
+                    for i in range(p_len):
+                        lab[i] = -100
+                labels.append(lab)
+            enc["labels"] = labels
+        else:
+            # Fallback (e.g. a dataset without prompt_text): train on all tokens.
+            enc["labels"] = [list(ids) for ids in enc["input_ids"]]
         return enc
 
     return ds.map(
