@@ -76,9 +76,9 @@ def _has_valid_checkpoint(output_dir: Path) -> bool:
 def _free_cuda_memory() -> None:
     """Run gc + torch.cuda.empty_cache and log before/after.
 
-    Called right before trainer.train() so any cached allocations from model
-    loading, dataset tokenization, etc. are released before the first
-    training step competes for VRAM with the materialized logits tensor.
+    Used to release cached allocations from model loading, dataset
+    tokenization, and (post-training) the dropped trainer/model, so the next
+    phase doesn't compete for VRAM with memory that is merely cached.
     """
     try:
         import torch  # type: ignore[import-not-found]
@@ -112,7 +112,56 @@ def build_trainer(
 ) -> tuple[Any, Splits, Any, Any]:
     """Construct model + data + SFTTrainer. Returns (trainer, splits, model, tokenizer)."""
     from trl import SFTConfig, SFTTrainer  # type: ignore[import-not-found]
-    from transformers import EarlyStoppingCallback  # type: ignore[import-not-found]
+    from transformers import (  # type: ignore[import-not-found]
+        EarlyStoppingCallback,
+        Trainer,
+    )
+
+    # ------------------------------------------------------------------------
+    # Memory-efficient SFTTrainer
+    # ------------------------------------------------------------------------
+    # Unsloth's patched model forward returns an ``EmptyLogits`` sentinel rather
+    # than a real ``[batch, seq, ~262K]`` logits tensor — a deliberate memory
+    # optimization (the fp32 logits tensor is multiple GB and would not fit on a
+    # 16 GB T4 alongside the ~10.3 GB fp16 base weights).
+    #
+    # TRL's ``SFTTrainer.compute_loss`` then tries to log token entropy /
+    # accuracy by reading ``outputs.logits`` (``entropy_from_logits`` does
+    # ``logits.shape[:-1]``). On the sentinel that raises
+    # ``TypeError: 'function' object is not subscriptable``.
+    #
+    # The old workaround was ``UNSLOTH_RETURN_LOGITS=1``, which forces real
+    # logits — and OOMs within ~10 steps. Instead we bypass TRL's metric block
+    # and compute the loss straight through the transformers ``Trainer`` path
+    # (which Unsloth patches for its fused, logit-free cross-entropy). We keep
+    # Unsloth's memory savings and avoid the crash. Cost: ``entropy`` and
+    # ``mean_token_accuracy`` are no longer logged; ``loss``, ``grad_norm`` and
+    # ``learning_rate`` are unaffected and remain the primary M2 signals.
+    class _MemoryEfficientSFTTrainer(SFTTrainer):  # type: ignore[misc, valid-type]
+        def compute_loss(
+            self,
+            model: Any,
+            inputs: Any,
+            return_outputs: bool = False,
+            num_items_in_batch: Any = None,
+        ) -> Any:
+            if isinstance(inputs, dict):
+                # TRL's compute_loss pops this private flag before the forward;
+                # we must too, or it leaks into the model as an unexpected kwarg
+                # during in-training evaluation.
+                inputs.pop("_prediction_loss_only", None)
+                # Caching is incompatible with gradient checkpointing.
+                inputs["use_cache"] = False
+            # Skip SFTTrainer.compute_loss (the entropy/accuracy block that reads
+            # outputs.logits) and go straight to the transformers Trainer loss,
+            # which Unsloth has patched onto Trainer.compute_loss.
+            return Trainer.compute_loss(
+                self,
+                model,
+                inputs,
+                return_outputs=return_outputs,
+                num_items_in_batch=num_items_in_batch,
+            )
 
     # --- Model -------------------------------------------------------------
     log.info("build_trainer_loading_model")
@@ -269,7 +318,9 @@ def build_trainer(
 
     # --- Trainer -----------------------------------------------------------
     # `tokenizer=` was renamed to `processing_class=` in TRL >= 0.16.
-    trainer = SFTTrainer(
+    # We use the memory-efficient subclass (see its definition above) so the
+    # loss is computed without materializing the full-vocab logits tensor.
+    trainer = _MemoryEfficientSFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=train_tokenized,     # was: splits.train
@@ -315,21 +366,18 @@ def run_training(
     )
 
     # ------------------------------------------------------------------
-    # CRITICAL — re-assert UNSLOTH_RETURN_LOGITS=1 immediately before
-    # trainer.train(). See Unsloth issue #3071: the env var can be cleared
-    # by an internal Unsloth code path between package import and the call
-    # to trainer.train(). Setting it here guarantees it is "1" at the
-    # moment the first training step runs.
+    # Log the allocator config that is in effect at the moment training
+    # starts. We no longer set UNSLOTH_RETURN_LOGITS — the memory-efficient
+    # trainer computes loss without real logits, so Unsloth's default
+    # (logit-free) path is exactly what we want.
     # ------------------------------------------------------------------
-    os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
     log.info(
         "training_env_check",
-        UNSLOTH_RETURN_LOGITS=os.environ.get("UNSLOTH_RETURN_LOGITS"),
         PYTORCH_CUDA_ALLOC_CONF=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
     )
 
     # Free any cached allocations from dataset prep before the first
-    # training step competes for VRAM with the materialized logits tensor.
+    # training step competes for VRAM.
     _free_cuda_memory()
 
     log.info("training_starting", resume=resume)
@@ -344,5 +392,14 @@ def run_training(
     # For LoRA, model.save_pretrained writes only the adapter weights (~50-200 MB).
     model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
+
+    # --- Release training VRAM --------------------------------------------
+    # The caller typically runs the evaluation pipeline next, which reloads the
+    # base model + adapter for inference. On a 16 GB T4 we cannot hold the
+    # training model (with optimizer/grad state) AND a second inference copy at
+    # the same time, so drop the trainer and model here and reclaim the memory
+    # before returning. The adapter is already safely on disk.
+    del trainer, train_result, model
+    _free_cuda_memory()
 
     return adapter_dir, splits

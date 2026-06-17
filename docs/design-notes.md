@@ -106,18 +106,23 @@ TRL ≥ 0.20 added per-token entropy logging in `compute_loss`, calling
 `entropy_from_logits(outputs.logits)` → `logits.shape[:-1]`. On the
 placeholder, that errors as shown above.
 
-**Fix:** Set `UNSLOTH_RETURN_LOGITS=1` before any Unsloth import. Forces
-Unsloth to materialize real logits tensors, trading memory for
-compatibility with TRL's entropy logging path.
+**Fix (current):** Do *not* force logits. Instead, bypass TRL's logit-reading
+entropy/accuracy block entirely and compute the loss straight through the
+`transformers.Trainer` path, which Unsloth patches with its fused, logit-free
+cross-entropy. This is implemented by `_MemoryEfficientSFTTrainer` (a
+`SFTTrainer` subclass) in `src/gemma_medical/train.py`, whose `compute_loss`
+pops the private `_prediction_loss_only` flag, sets `use_cache=False`, and
+delegates to `Trainer.compute_loss`. We keep Unsloth's memory savings and never
+hit `entropy_from_logits`. Cost: `entropy` and `mean_token_accuracy` are no
+longer logged; `loss`, `grad_norm` and `learning_rate` are unaffected.
 
-Applied in **four** places (defense in depth — Unsloth issue #3071 reports
-the env var occasionally getting cleared during training):
-
-1. `src/gemma_medical/__init__.py` — set at first package import
-2. `scripts/run_train.py` — set at file-top, before any `from gemma_medical` imports
-3. `scripts/run_baseline.py` and `scripts/run_eval.py` — same
-4. `src/gemma_medical/train.py:run_training` — re-asserted immediately
-   before `trainer.train()`
+> **Superseded approach (kept for history):** earlier we set
+> `UNSLOTH_RETURN_LOGITS=1` before every Unsloth import to force real logits.
+> It removed this TypeError but materialized a multi-GB fp32 logits tensor that
+> caused Crash 4 (below). It has been removed from `__init__.py`,
+> `run_train.py`, `run_baseline.py`, `run_eval.py`, and `train.run_training`.
+> Perplexity never needed it either — `evaluate.compute_perplexity` reads the
+> model's fused `.loss`, not `.logits`.
 
 ### Crash 3 — `ValueError: No valid checkpoint found in output directory`
 
@@ -179,6 +184,17 @@ A `_free_cuda_memory()` call (gc + `torch.cuda.empty_cache()`) was also
 added immediately before `trainer.train()` so any cached allocations from
 dataset prep are released before the first training step competes for VRAM.
 
+> **Update (2026-06-16):** Crash 4's *root cause* — the materialized fp32
+> logits tensor — disappears entirely once `UNSLOTH_RETURN_LOGITS=1` is
+> removed (see Crash 2's current fix). With Unsloth's logit-free path there is
+> no full-vocab tensor to upcast, which frees ~3 GB of steady-state VRAM. The
+> mitigations above (batch=1 + grad-accum=8, `expandable_segments:True`,
+> explicit eval batch size, pre-train `_free_cuda_memory()`) are all kept as
+> cheap, robust hygiene, and the headroom they now buy is what lets
+> `max_seq_length` go back up to 1024. A post-training `del trainer, model` +
+> `_free_cuda_memory()` was also added in `run_training` so the evaluation
+> reload doesn't have to hold the training model and an inference copy at once.
+
 ### What we did NOT do (and why)
 
 - **Pin TRL to an older version.** Unsloth 2026.6.x deps require
@@ -195,6 +211,10 @@ dataset prep are released before the first training step competes for VRAM.
   the fp32 conversion entirely. Rejected: the model itself would then run
   in full fp32, which would OOM the moment it's loaded (~20 GiB vs T4's
   ~14.5 GiB).
-- **Reduce `max_seq_length` from 2048 → 1024.** Would help linearly with
-  memory, but ~30% of the medical CoT chains in this dataset are >1024
-  tokens. Kept at 2048 since batch=1 already fits.
+- **Keep `max_seq_length` at 2048.** The earliest configs used 2048; under
+  the forced-logits regime that was the dominant memory term and it was
+  temporarily cut to 768 to survive. With logits no longer materialized the
+  pressure is gone, so it now sits at **1024** — a deliberate middle ground
+  that captures the long medical CoT chains (a minority of examples exceed
+  1024 and are truncated cleanly) while leaving generous headroom for the
+  generation spike during in-training sampling and post-training eval.

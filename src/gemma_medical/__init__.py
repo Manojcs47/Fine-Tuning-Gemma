@@ -7,35 +7,28 @@ import os
 # CRITICAL ENV VARS — must be set before any torch import.
 # ---------------------------------------------------------------------------
 #
-# UNSLOTH_RETURN_LOGITS=1
-#   Forces Unsloth to materialize real logits tensors. Required because
-#   TRL >= 0.20's SFTTrainer.compute_loss calls entropy_from_logits which
-#   does logits.shape[:-1]; on Unsloth's EmptyLogits placeholder, `shape`
-#   is a method, not a property, and that fails with
-#   "TypeError: 'function' object is not subscriptable".
-#
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 #   Without this, PyTorch's caching allocator fragments over training steps:
-#   freed regions become unusable, and OOM hits even when "free" memory in
-#   nvidia-smi is several hundred MB. The error message itself recommends
-#   this setting. The env var name has _CUDA_ in it — the runtime error
-#   text "PYTORCH_ALLOC_CONF" is wrong (a known PyTorch typo).
+#   freed regions become unusable and OOM hits even when "free" memory in
+#   nvidia-smi is several hundred MB. The error message itself recommends this
+#   setting. PyTorch reads it ONCE, when the CUDA allocator first initializes,
+#   so the authoritative place to set it is the shell (the `!VAR=... python`
+#   prefix in the Kaggle cell). Setting it here is belt-and-suspenders for the
+#   case where the package is imported before the first CUDA call.
 #
-# NOTE on `=` vs `setdefault`:
-#   We use direct assignment, not setdefault. Unsloth's package init clears
-#   some env vars on its way through (issue #3071 et al.) — setdefault won't
-#   re-set after that. The shell-level export in the Kaggle cell is the
-#   authoritative source; this is belt-and-suspenders.
+# NOTE — we deliberately DO NOT set UNSLOTH_RETURN_LOGITS=1 anymore.
+#   That flag forces Unsloth to materialize the full [batch, seq, ~262K] logits
+#   tensor on every step (several GB in fp32). It was originally added to dodge
+#   a TRL crash (SFTTrainer.compute_loss runs entropy_from_logits, which does
+#   `logits.shape[:-1]` and blows up on Unsloth's EmptyLogits sentinel). But on
+#   a 16 GB T4 the forced logits tensor OOMs within ~10 steps. The real fix is
+#   to keep Unsloth's logit-free fused cross-entropy and skip TRL's logit-based
+#   entropy metric instead — see gemma_medical.train._MemoryEfficientSFTTrainer.
 # ---------------------------------------------------------------------------
-os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# Print at import time so the kernel log shows whether the env vars stuck.
-# If you see them as None somewhere later, that's diagnostic — something in
-# the import chain cleared them.
+# Print at import time so the kernel log shows whether the alloc-conf stuck.
 _alloc = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
-_logits = os.environ.get("UNSLOTH_RETURN_LOGITS")
-print(f"[gemma_medical] env at import: "
-      f"PYTORCH_CUDA_ALLOC_CONF={_alloc!r} UNSLOTH_RETURN_LOGITS={_logits!r}")
+print(f"[gemma_medical] env at import: PYTORCH_CUDA_ALLOC_CONF={_alloc!r}")
 
 __version__ = "0.1.0"

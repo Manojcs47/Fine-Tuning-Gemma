@@ -7,11 +7,14 @@ Usage:
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: env-var setdefaults must run BEFORE any import that could
+# CRITICAL: the allocator setting must run BEFORE any import that could
 # transitively import unsloth or initialize CUDA.
+#
+# We do NOT set UNSLOTH_RETURN_LOGITS — perplexity is computed from the
+# model's fused `.loss` (see evaluate.compute_perplexity), never from a real
+# logits tensor, so Unsloth's default logit-free path is what we want here too.
 # ---------------------------------------------------------------------------
 import os
-os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse

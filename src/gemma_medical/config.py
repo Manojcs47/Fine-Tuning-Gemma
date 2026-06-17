@@ -101,8 +101,8 @@ class TrainingConfig(BaseModel):
     """Optimizer + scheduler + batching."""
 
     learning_rate: float = Field(default=2e-4, gt=0, le=1e-2)
-    # Per-device batch sizing. On T4 with UNSLOTH_RETURN_LOGITS=1, train batch must
-    # stay at 1 (see configs/lora_default.yaml batch sizing note). eval batch
+    # Per-device batch sizing. batch=1 with grad-accumulation is the safe T4
+    # default (see configs/lora_default.yaml batch sizing note). eval batch
     # defaults to None which means "match train"; setting it explicitly avoids
     # TrainingArguments' default of 8 (which would OOM at the first eval).
     per_device_train_batch_size: int = Field(default=1, ge=1, le=16)

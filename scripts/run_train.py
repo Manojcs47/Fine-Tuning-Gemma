@@ -20,17 +20,18 @@ before PyTorch's CUDA allocator initializes.
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: force-set env vars before ANY import that could transitively
-# import torch or unsloth. We use direct assignment (not setdefault) because
-# Unsloth's package init can clear these — see src/gemma_medical/__init__.py
-# for the full story. This script-level assignment is belt-and-suspenders;
-# the canonical place to set PYTORCH_CUDA_ALLOC_CONF is at the shell level
-# (in the !python command), since that's the only thing PyTorch sees
-# guaranteed-before allocator initialization.
+# Set the allocator config before ANY import that could transitively import
+# torch. The canonical place to set PYTORCH_CUDA_ALLOC_CONF is the shell level
+# (the `!VAR=... python` prefix in the Kaggle cell), since that's the only
+# thing PyTorch is guaranteed to see before the CUDA allocator initializes;
+# this is belt-and-suspenders for direct `python scripts/run_train.py` runs.
+#
+# We intentionally do NOT set UNSLOTH_RETURN_LOGITS=1 — that forces the full
+# ~262K-vocab logits tensor and OOMs a T4. See src/gemma_medical/__init__.py
+# and train._MemoryEfficientSFTTrainer for the full story.
 # ---------------------------------------------------------------------------
 import os
-os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
 import gc

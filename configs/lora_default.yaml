@@ -5,19 +5,21 @@ notes: |
   M2 first LoRA fine-tune. Sensible defaults, single epoch, no sweep.
   Acceptance: trains without OOM, loss decreases monotonically after warmup.
 
-  Context length note (2026-06-12):
-  max_seq_length is 768 (was 1024, was 2048). On Kaggle T4 with Gemma 4 E2B
-  at fp16 (~10.3 GB base weights) + Unsloth's UNSLOTH_RETURN_LOGITS=1 forcing
-  the full [B, S, 262144] logits tensor + fp32 upcast in eval, anything
-  above 768 puts us at the absolute VRAM ceiling and fragmentation OOMs
-  within 10 training steps. 768 covers >95% of medical-o1 examples after
-  chat-templating; the remainder are truncated cleanly.
+  Context length note (2026-06-16):
+  max_seq_length is 1024 (was briefly dropped to 768). Earlier the run forced
+  Unsloth to materialize the full [B, S, 262144] logits tensor (via
+  UNSLOTH_RETURN_LOGITS=1), which at any length above ~768 sat at the T4 VRAM
+  ceiling and OOM'd within ~10 steps. That env var has been removed: loss is
+  now computed through Unsloth's fused, logit-free cross-entropy (see
+  gemma_medical.train._MemoryEfficientSFTTrainer), which frees ~3 GB of
+  steady-state VRAM. 1024 fits comfortably and captures the long medical CoT
+  answers more faithfully; the rare longer example is truncated cleanly.
 
   Batch sizing: per_device=1 + grad_accum=8 → effective batch 8.
 
 model:
   base_model: unsloth/gemma-4-E2B-it
-  max_seq_length: 768               # was 1024 — see note above
+  max_seq_length: 1024              # restored from 768 — see note above
   load_in_4bit: false
   full_finetuning: false
 

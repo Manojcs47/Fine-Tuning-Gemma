@@ -65,22 +65,26 @@ def test_ignores_checkpoint_prefix_on_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_package_sets_unsloth_return_logits() -> None:
-    """Importing gemma_medical must set UNSLOTH_RETURN_LOGITS=1.
+def test_package_does_not_force_return_logits() -> None:
+    """Importing gemma_medical must NOT set UNSLOTH_RETURN_LOGITS=1.
 
-    Smoke test for the M2 bug-bash #2 workaround. If this regresses,
-    training on Kaggle will crash with `'function' object is not subscriptable`.
+    Forcing real logits materializes a [B, S, ~262K] fp32 tensor that OOMs a
+    T4 within ~10 steps. Loss is instead computed through Unsloth's fused,
+    logit-free cross-entropy (see train._MemoryEfficientSFTTrainer), so the
+    package must leave this env var unset and let Unsloth use its default
+    (memory-efficient) path. If this regresses, training will OOM on Kaggle.
     """
     import gemma_medical  # noqa: F401
-    assert os.environ.get("UNSLOTH_RETURN_LOGITS") == "1"
+    assert os.environ.get("UNSLOTH_RETURN_LOGITS") in (None, "0")
 
 
 def test_package_sets_pytorch_cuda_alloc_conf() -> None:
     """Importing gemma_medical must set PYTORCH_CUDA_ALLOC_CONF.
 
-    Smoke test for the M2 bug-bash #3 workaround. Without this, training
-    on T4 OOMs during accelerate's fp32 conversion of the materialized
-    logits tensor due to memory fragmentation.
+    Without expandable_segments the T4 allocator fragments across training
+    steps and OOMs even when nvidia-smi shows free memory. (The shell-level
+    export in the Kaggle cell is the authoritative source; this setdefault is
+    a fallback for direct `python` invocation.)
     """
     import gemma_medical  # noqa: F401
     val = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
