@@ -338,11 +338,14 @@ def run_training(
     *,
     use_wandb: bool = False,
     resume: bool = False,
-) -> tuple[Path, Splits]:
-    """Run end-to-end training. Returns (adapter_path, splits).
+) -> tuple[Path, Splits, Any, Any]:
+    """Run end-to-end training. Returns (adapter_path, splits, model, tokenizer).
 
-    The splits are returned so the caller can pass test/val to the evaluation
-    pipeline without reloading the dataset.
+    The trained model (with its LoRA adapter, switched to Unsloth inference
+    mode) and tokenizer are returned so the caller can evaluate WITHOUT loading
+    a second base-model copy — which would OOM a 16 GB T4. The splits are
+    returned so the caller can pass test/val to the evaluation pipeline without
+    reloading the dataset.
     """
     # Per-experiment output dir under the runtime settings root.
     output_dir = settings.checkpoint_dir / cfg.name
@@ -393,13 +396,19 @@ def run_training(
     model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
 
-    # --- Release training VRAM --------------------------------------------
-    # The caller typically runs the evaluation pipeline next, which reloads the
-    # base model + adapter for inference. On a 16 GB T4 we cannot hold the
-    # training model (with optimizer/grad state) AND a second inference copy at
-    # the same time, so drop the trainer and model here and reclaim the memory
-    # before returning. The adapter is already safely on disk.
-    del trainer, train_result, model
+    # --- Release the trainer, KEEP the model ------------------------------
+    # On a 16 GB T4 we cannot hold two ~10 GB base-model copies at once, and
+    # Unsloth keeps the base weights resident even after `del model`, so a
+    # fresh `load_model_for_inference` for the post-training eval OOMs. Instead
+    # we drop only the trainer (optimizer state + grad accumulators, plus the
+    # large activation buffers) and hand the already-trained model — adapter and
+    # all — straight to evaluation. We switch it into Unsloth inference mode
+    # here so its training-mode buffers are torn down before eval generates.
+    del trainer, train_result
     _free_cuda_memory()
 
-    return adapter_dir, splits
+    from gemma_medical.inference import prepare_model_for_inference
+    prepare_model_for_inference(model, tokenizer)
+    _free_cuda_memory()
+
+    return adapter_dir, splits, model, tokenizer

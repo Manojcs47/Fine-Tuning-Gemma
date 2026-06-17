@@ -56,7 +56,14 @@ data:
   seed: 3407
 
 training:
-  learning_rate: 2.0e-4
+  # Peak LR lowered 2.0e-4 -> 1.0e-4 (2026-06-17). At 2e-4 the run was stable
+  # through ~step 40 (grad_norm ~1.0, loss falling to ~0.8) then collapsed right
+  # as the cosine warmup pushed LR past ~1.5e-4: grad_norm fell to ~5e-4 and the
+  # loss froze at ~1.555 for the rest of the run — the LoRA stopped updating.
+  # That is the textbook signature of too-high LR for fp16 LoRA (T4 has no
+  # bf16). 1e-4 keeps the schedule below the level where it destabilized. If a
+  # run still flattens with grad_norm collapsing, drop to 5.0e-5.
+  learning_rate: 1.0e-4
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 8

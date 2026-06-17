@@ -71,6 +71,22 @@ def _configure_padding(tokenizer: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def prepare_model_for_inference(model: Any, tokenizer: Any) -> None:
+    """Put an already-loaded model+tokenizer into generation-ready state.
+
+    Shared by `load_model_for_inference` (fresh load) and the post-training
+    path in `train.run_training`, which reuses the just-trained model instead
+    of loading a second base-model copy (two ~10 GB copies do not fit on a T4).
+    """
+    from unsloth import FastModel  # type: ignore[import-not-found]
+
+    # Switch to inference mode (Unsloth: 2x faster) and free training-mode state.
+    FastModel.for_inference(model)
+    # Generation needs left padding for decoder-only models. Gemma4Processor
+    # delegates some attrs to the inner tokenizer — set them there directly.
+    _configure_padding(tokenizer)
+
+
 def load_model_for_inference(
     config: ModelConfig, adapter_path: str | None = None
 ) -> tuple[Any, Any]:
@@ -103,12 +119,7 @@ def load_model_for_inference(
         log.info("loading_adapter", path=adapter_path)
         model.load_adapter(adapter_path)
 
-    # Switch to inference mode (Unsloth: 2x faster)
-    FastModel.for_inference(model)
-
-    # Generation needs left padding for decoder-only models. Gemma4Processor
-    # delegates some attrs to the inner tokenizer — set them there directly.
-    _configure_padding(tokenizer)
+    prepare_model_for_inference(model, tokenizer)
 
     log.info(
         "tokenizer_kind",
