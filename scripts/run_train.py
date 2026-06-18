@@ -63,6 +63,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-eval", action="store_true",
                    help="Skip post-training evaluation")
     p.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    p.add_argument("--tags", type=str, default="m2,train",
+                   help="Comma-separated W&B tags (default for M2; "
+                        "sweep passes m3-specific tags)")
     p.add_argument("--output-dir", type=str, default=None,
                    help="Override output directory for evaluation artifacts")
     return p.parse_args()
@@ -129,7 +132,8 @@ def main() -> int:
 
     # --- W&B init ----------------------------------------------------------
     use_wandb = not args.no_wandb
-    wandb_run = init_wandb(cfg, settings, tags=["m2", "train"]) if use_wandb else None
+    tag_list = [t.strip() for t in args.tags.split(",") if t.strip()]
+    wandb_run = init_wandb(cfg, settings, tags=tag_list) if use_wandb else None
     use_wandb = wandb_run is not None
 
     # --- Train -------------------------------------------------------------

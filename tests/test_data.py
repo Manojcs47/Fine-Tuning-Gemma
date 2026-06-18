@@ -49,7 +49,7 @@ def test_format_example_returns_text_field() -> None:
         "Response": "Hypertension is high blood pressure.",
     }
     out = format_example(example, tok)
-    assert set(out.keys()) == {"text"}
+    assert set(out.keys()) == {"text", "prompt_text"}
     assert "What is hypertension?" in out["text"]
     assert "Step 1" in out["text"]
 

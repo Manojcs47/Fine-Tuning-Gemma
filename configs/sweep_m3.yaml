@@ -1,0 +1,101 @@
+sweep_name: m3-lora-sweep
+base_config_path: configs/lora_default.yaml
+description: |
+  M3 hyperparameter sweep — 8 runs covering 3 LRs, 3 ranks, and 3 variations.
+
+  Anchor: LR=1e-4, rank=16, alpha=16, all-7 target modules, warmup_ratio=0.05.
+  Every non-anchor run differs from anchor in exactly one dimension, which
+  makes the per-run delta vs anchor attributable to a single hyperparameter.
+
+  Sweep-wide overrides shrink train + eval so each run completes in ~90 min:
+    - num_train_epochs: 0.5 (M2 collapsed early anyway; full epoch wasteful)
+    - early_stopping_patience: 2 (halt bad configs faster)
+    - n_predictions: 50, n_judge_samples: 10
+
+  After picking the winner, scripts/run_eval.py reruns it with full M2-style
+  eval (200 predictions, 50 judge) so the headline number is comparable to
+  the M1 baseline.
+
+sweep_overrides:
+  training:
+    num_train_epochs: 0.5
+    eval_steps: 50
+    save_steps: 100
+    eval_dataset_size: 50
+    sample_print_steps: 100
+  early_stopping:
+    enabled: true
+    early_stopping_patience: 2
+    early_stopping_threshold: 0.005
+  evaluation:
+    n_predictions: 50
+    n_judge_samples: 10
+    n_qualitative_samples: 3
+    perplexity_samples: 50
+
+runs:
+  # --- LR sweep at rank=16 ---
+  - name: m3-lr5e5-r16
+    description: Low LR. M2 collapsed at 2e-4; 5e-5 should stay stable.
+    overrides:
+      training:
+        learning_rate: 5.0e-5
+
+  - name: m3-lr1e4-r16
+    description: Mid LR (anchor). Productive learning region from M2 warmup.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+
+  - name: m3-lr2e4-r16
+    description: High LR. M2 default; included to confirm divergence reproduces.
+    overrides:
+      training:
+        learning_rate: 2.0e-4
+
+  # --- Rank sweep at LR=1e-4 ---
+  - name: m3-lr1e4-r8
+    description: Half rank. Tests whether r=8 underfits at the safe LR.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+      lora:
+        r: 8
+        lora_alpha: 8
+
+  - name: m3-lr1e4-r32
+    description: Double rank. Tests whether r=32 helps or just trains slower.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+      lora:
+        r: 32
+        lora_alpha: 32
+
+  # --- Variations on anchor (LR=1e-4, rank=16) ---
+  - name: m3-lr1e4-r16-attn
+    description: Attention-only target modules (4 instead of 7). Cheaper.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+      lora:
+        target_modules:
+          - q_proj
+          - k_proj
+          - v_proj
+          - o_proj
+
+  - name: m3-lr1e4-r16-warmup10
+    description: Doubled warmup. M2 broke at peak LR; longer ramp might help.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+        warmup_ratio: 0.10
+
+  - name: m3-lr1e4-r16-alpha32
+    description: alpha=2*r (32 vs r=16). Higher effective LoRA scaling factor.
+    overrides:
+      training:
+        learning_rate: 1.0e-4
+      lora:
+        lora_alpha: 32
