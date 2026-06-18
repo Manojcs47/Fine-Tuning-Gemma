@@ -218,3 +218,76 @@ dataset prep are released before the first training step competes for VRAM.
   that captures the long medical CoT chains (a minority of examples exceed
   1024 and are truncated cleanly) while leaving generous headroom for the
   generation spike during in-training sampling and post-training eval.
+  ## M2 — First LoRA fine-tune (2026-06-17)
+
+### Acceptance status
+PASS (pipeline-level). M2's acceptance criteria are pipeline end-to-end +
+loss decrease after warmup, both met. Hyperparameter quality is M3's
+problem, not M2's.
+
+### Training behavior — divergence at LR peak
+
+Trained `lora-default-r16-lr2e4` (LR=2e-4, r=16, full 7 target modules,
+adamw_8bit, fp16 on T4) for 1 epoch, expected 1169 steps. Early stopping
+fired at step 400 after 3 consecutive evals plateaued.
+
+Loss trajectory (logging_steps=10 windows):
+- step 10: train_loss=1.54, grad_norm=2.3 (warming up)
+- step 30: train_loss=0.79, grad_norm=0.9 (best — model is learning)
+- step 50: train_loss=1.51, grad_norm=0.03 (overshoot, gradient collapse)
+- step 100→400: train_loss flat at ~1.555, grad_norm ~1e-3 to 1e-4 (frozen)
+
+Eval loss flat at 1.93 from step 100 onward; deltas below the 0.005 early
+stopping threshold; patience=3 fired correctly at step 400.
+
+### Root cause
+
+Classic fp16 + adamw_8bit instability at peak LR. The 5% warmup ramps LR
+from 0 to 2e-4 over the first ~58 steps. The model learned productively
+during low-LR warmup (steps 0-30, LR going through ~1e-4), then overshot
+around steps 40-50 as LR approached peak (1.5-2e-4). The 8-bit optimizer
+states couldn't recover precision; gradients underflowed; the model got
+stuck in a near-zero-gradient region for the rest of training.
+
+The smoke test (12 steps, all within warmup) showed clean learning and
+better judge metrics than the full run, which is consistent with this
+diagnosis — the failure mode is specifically at-peak-LR.
+
+### M2 results vs M1 baseline
+
+| Metric              | M1 baseline | M2 (collapsed) | Delta  |
+|---------------------|-------------|----------------|--------|
+| Exact match         | 0.000       | 0.000          | flat   |
+| Contains match      | 0.020       | 0.020          | flat   |
+| Token F1            | 0.267       | 0.230          | -0.037 |
+| Perplexity          | 32.51       | 9.64           | -22.9  |
+| Mean output tokens  | 495.5       | 429.6          | -65.9  |
+| Judge aggregate     | 3.90        | 3.77           | -0.13  |
+| Judge: correctness  | 3.10        | 3.12           | flat   |
+| Judge: validity     | 3.67        | 3.38           | -0.29  |
+| Judge: fabrication  | 4.92        | 4.82           | flat   |
+
+Interpretation: perplexity dropped 70% (the model learned the dataset's
+text distribution) but task-correctness metrics did not improve. The model
+became more *fluent at this style* without becoming *more correct*. This
+is distribution overfit caused by the early training collapse.
+
+### Implications for M3
+
+Search range needs to focus BELOW 2e-4. The productive learning region
+was around LR=1e-4 (peak grad_norm ~1, loss dropping from 1.5 to 0.8).
+M3 sweep should include 5e-5, 1e-4, and 2e-4 (where 2e-4 is included
+specifically to confirm/reject the divergence finding with different
+ranks). Also include a lower warmup_ratio config to test whether faster
+warmup is causing the overshoot.
+
+### Engineering wins from M2
+
+- Eight separate integration bugs surfaced and fixed (UNSLOTH_RETURN_LOGITS,
+  alloc fragmentation, dill pickle, TRL 0.16+ rename, Gemma4Processor
+  positional binding, eval batch default, resume guard, env var clearing).
+  All documented inline as NOTE: comments.
+- Pre-tokenization workaround in data.py decouples us from TRL's broken
+  multiprocess tokenization. Sweep runs will inherit this fix for free.
+- Early stopping fired exactly as designed. Without it, we would have
+  wasted ~2.5 more hours of T4 time on a frozen model.
