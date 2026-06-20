@@ -67,7 +67,7 @@ evaluation:
   n_judge_samples: 50
   n_qualitative_samples: 10
   perplexity_samples: 100
-  max_new_tokens: 1024
+  max_new_tokens: 512
   do_sample: false
   batch_size: 4
   judge_model: unsloth/gemma-4-E2B-it

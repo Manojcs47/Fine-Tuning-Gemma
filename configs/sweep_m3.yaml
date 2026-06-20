@@ -28,7 +28,7 @@ sweep_overrides:
     early_stopping_patience: 2
     early_stopping_threshold: 0.005
   evaluation:
-    n_predictions: 50
+    n_predictions: 20
     n_judge_samples: 10
     n_qualitative_samples: 3
     perplexity_samples: 50
