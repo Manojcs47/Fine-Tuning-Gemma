@@ -32,6 +32,7 @@ sweep_overrides:
     n_judge_samples: 10
     n_qualitative_samples: 3
     perplexity_samples: 50
+    max_new_tokens: 512 
 
 runs:
   # --- LR sweep at rank=16 ---
